@@ -1,7 +1,16 @@
 // Fills the database with demo users and auctions: npm run seed
 import { getDb } from "../src/lib/db.ts";
 import { registerUser, authenticate } from "../src/lib/users.ts";
-import { createAuction, placeBid } from "../src/lib/auctions.ts";
+import {
+  applyPaymentResult,
+  closeDueAuctions,
+  createAuction,
+  createPayment,
+  getOrderForAuction,
+  markShipped,
+  placeBid,
+  setShippingAddress,
+} from "../src/lib/auctions.ts";
 
 const db = getDb();
 const user = (email: string, name: string) => {
@@ -14,6 +23,7 @@ const user = (email: string, name: string) => {
 const seller = user("seller@example.com", "Ama Seller");
 const buyer = user("buyer@example.com", "Kofi Buyer");
 const other = user("bidder@example.com", "Esi Bidder");
+user("admin@example.com", "Bidwell Admin"); // add admin@example.com to ADMIN_EMAILS
 
 const now = Date.now();
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
@@ -36,4 +46,28 @@ for (const [title, category, condition, start, inc, len, description] of items) 
     placeBid(db, id, buyer.id, start + inc);
   }
 }
-console.log("Seeded. Sign in as seller@example.com, buyer@example.com or bidder@example.com with password123.");
+// Two auctions that already ended and were won by the buyer, so the escrow flow can be tried at once.
+const addr = { name: "Kofi Buyer", phone: "0240000000", line1: "12 Ring Road", city: "Accra", region: "Greater Accra", country: "Ghana" };
+const ended = [
+  ["Kenwood stand mixer", "Home & Kitchen", 40000, "Works perfectly, bowl and three attachments."],
+  ["Nintendo Switch with 2 games", "Toys & Games", 120000, "Screen protector on since day one. Joy-cons don't drift."],
+] as const;
+ended.forEach(([title, category, start, description], i) => {
+  const t0 = now - 3 * HOUR;
+  const id = createAuction(db, {
+    sellerId: seller.id, title, description, category, condition: "Used - Good", imagePath: null,
+    startingBidCents: start, minIncrementCents: 1000, endsAt: t0 + 2 * MIN,
+  }, t0);
+  placeBid(db, id, other.id, start, t0 + MIN);
+  placeBid(db, id, buyer.id, start + 2000, t0 + MIN + 1);
+  closeDueAuctions(db, now);
+  const o = getOrderForAuction(db, id)!;
+  setShippingAddress(db, o.id, buyer.id, addr);
+  if (i === 1) {
+    const p = createPayment(db, o.id, buyer.id, "demo", process.env.NEXT_PUBLIC_CURRENCY ?? "GHS");
+    applyPaymentResult(db, p.reference, { status: "success", amountCents: p.amount_cents, currency: p.currency }, "demo checkout");
+    markShipped(db, o.id, seller.id, "DHL", "GH4471902");
+  }
+});
+
+console.log("Seeded. Sign in as seller@example.com, buyer@example.com or bidder@example.com with password123 (admin: admin@example.com).");

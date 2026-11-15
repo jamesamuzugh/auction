@@ -8,7 +8,7 @@ import Countdown from "@/components/Countdown.tsx";
 export const dynamic = "force-dynamic";
 
 function OrderPill({ status }: { status: string }) {
-  const cls = status === "delivered" ? "ok" : status === "awaiting_address" ? "err" : "accent";
+  const cls = ["completed", "refunded"].includes(status) ? "ok" : ["awaiting_address", "disputed"].includes(status) ? "err" : "accent";
   return <span className={`pill ${cls}`}>{ORDER_LABEL[status] ?? status}</span>;
 }
 
@@ -22,7 +22,10 @@ export default async function Account() {
   return (
     <>
       <h1>Hi, {me.name}</h1>
-      <p className="muted" style={{ marginTop: 0 }}>{me.email}</p>
+      <div className="spread">
+        <p className="muted" style={{ margin: 0 }}>{me.email}</p>
+        <Link href="/account/payouts" className="btn">Payouts and payout details</Link>
+      </div>
 
       <h2>Items you won</h2>
       <div className="card table-wrap">

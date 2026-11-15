@@ -75,7 +75,14 @@ test("Paystack webhook signature is checked", () => {
   process.env.PAYSTACK_SECRET_KEY = "sk_test_abc";
   const body = JSON.stringify({ event: "charge.success", data: { reference: "ord1-x" } });
   const sig = crypto.createHmac("sha512", "sk_test_abc").update(body).digest("hex");
-  assert.deepEqual(paystack.parseWebhook(body, new Headers({ "x-paystack-signature": sig })), { reference: "ord1-x" });
+  assert.deepEqual(paystack.parseWebhook(body, new Headers({ "x-paystack-signature": sig })), { kind: "charge", reference: "ord1-x" });
+  const signed = (o: object) => {
+    const b = JSON.stringify(o);
+    return paystack.parseWebhook(b, new Headers({ "x-paystack-signature": crypto.createHmac("sha512", "sk_test_abc").update(b).digest("hex") }));
+  };
+  assert.deepEqual(signed({ event: "transfer.success", data: { reference: "payout-1" } }), { kind: "transfer", reference: "payout-1", status: "paid" });
+  assert.deepEqual(signed({ event: "transfer.reversed", data: { reference: "payout-1" } }), { kind: "transfer", reference: "payout-1", status: "failed", message: "transfer.reversed" });
+  assert.deepEqual(signed({ event: "refund.processed", data: { transaction_reference: "ord1-x" } }), { kind: "refund", reference: "ord1-x", status: "processed" });
   assert.equal(paystack.parseWebhook(body, new Headers({ "x-paystack-signature": "0".repeat(128) })), null);
   assert.equal(paystack.parseWebhook(body + " ", new Headers({ "x-paystack-signature": sig })), null);
 });
@@ -101,6 +108,38 @@ test("Paystack initialize and verify talk to the right endpoints", async () => {
     const v = await paystack.verify("ref1");
     assert.deepEqual(v, { status: "success", amountCents: 2500, currency: "GHS", providerRef: "42" });
     assert.equal(calls[1].url, "https://api.paystack.co/transaction/verify/ref1");
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+test("Paystack payouts and refunds call the right endpoints", async () => {
+  process.env.PAYSTACK_SECRET_KEY = "sk_test_abc";
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : {} });
+    const data = url.includes("/bank")
+      ? [{ name: "MTN", code: "MTN", type: "mobile_money", active: true }, { name: "GCB Bank", code: "040100", type: "ghipss", active: true }]
+      : url.includes("transferrecipient")
+        ? { recipient_code: "RCP_1" }
+        : url.includes("/transfer")
+          ? { status: "otp", transfer_code: "TRF_1" }
+          : { id: 7, status: "pending" };
+    return new Response(JSON.stringify({ status: true, data }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const banks = await paystack.payouts!.listBanks("GHS");
+    assert.deepEqual(banks.map((b) => b.type), ["mobile_money", "bank"]);
+    assert.equal(await paystack.payouts!.createRecipient({ method: "bank", name: "S", accountNumber: "123", bankCode: "040100", currency: "GHS" }), "RCP_1");
+    assert.equal(calls[1].body.type, "ghipss");
+    const t = await paystack.payouts!.transfer({ amountCents: 9500, currency: "GHS", recipient: "RCP_1", reference: "payout-1", reason: "x" });
+    assert.equal(t.status, "failed");
+    assert.match(t.message!, /OTP/);
+    assert.deepEqual(calls[2].body, { source: "balance", amount: 9500, currency: "GHS", recipient: "RCP_1", reference: "payout-1", reason: "x" });
+    const r = await paystack.refund("ord1-x", 2500);
+    assert.deepEqual(r, { status: "processing", providerRef: "7" });
+    assert.deepEqual(calls[3].body, { transaction: "ord1-x", amount: 2500 });
   } finally {
     globalThis.fetch = real;
   }

@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS orders (
   seller_id       INTEGER NOT NULL REFERENCES users(id),
   amount_cents    INTEGER NOT NULL,
   status          TEXT NOT NULL DEFAULT 'awaiting_address'
-                  CHECK (status IN ('awaiting_address','awaiting_payment','paid','shipped','delivered','cancelled')),
+                  CHECK (status IN ('awaiting_address','awaiting_payment','paid','shipped','delivered',
+                                    'disputed','completed','refunded','cancelled')),
   ship_name       TEXT,
   ship_phone      TEXT,
   ship_line1      TEXT,
@@ -70,6 +71,11 @@ CREATE TABLE IF NOT EXISTS orders (
   ship_country    TEXT,
   carrier         TEXT,
   tracking_number TEXT,
+  -- Escrow: Bidwell holds the money from payment until it is released to the seller or refunded.
+  escrow_status   TEXT NOT NULL DEFAULT 'none' CHECK (escrow_status IN ('none','held','frozen','released','refunded')),
+  shipped_at      INTEGER,
+  delivered_at    INTEGER,
+  release_at      INTEGER,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -87,6 +93,65 @@ CREATE TABLE IF NOT EXISTS payments (
   updated_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS payments_order ON payments(order_id);
+
+CREATE TABLE IF NOT EXISTS disputes (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id        INTEGER NOT NULL REFERENCES orders(id),
+  opened_by       INTEGER NOT NULL REFERENCES users(id),
+  reason          TEXT NOT NULL,
+  details         TEXT NOT NULL,
+  prev_status     TEXT NOT NULL,
+  seller_response TEXT,
+  status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','refunded','released','resumed')),
+  admin_note      TEXT,
+  resolved_by     INTEGER REFERENCES users(id),
+  created_at      INTEGER NOT NULL,
+  resolved_at     INTEGER
+);
+CREATE INDEX IF NOT EXISTS disputes_order ON disputes(order_id);
+
+CREATE TABLE IF NOT EXISTS payout_accounts (
+  user_id        INTEGER PRIMARY KEY REFERENCES users(id),
+  method         TEXT NOT NULL CHECK (method IN ('bank','mobile_money')),
+  bank_code      TEXT NOT NULL,
+  bank_name      TEXT NOT NULL,
+  account_number TEXT NOT NULL,
+  account_name   TEXT NOT NULL,
+  recipient_code TEXT,
+  updated_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS payouts (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id       INTEGER NOT NULL UNIQUE REFERENCES orders(id),
+  seller_id      INTEGER NOT NULL REFERENCES users(id),
+  gross_cents    INTEGER NOT NULL,
+  fee_cents      INTEGER NOT NULL,
+  amount_cents   INTEGER NOT NULL,
+  currency       TEXT NOT NULL,
+  status         TEXT NOT NULL CHECK (status IN ('waiting_details','pending','processing','paid','failed')),
+  reference      TEXT NOT NULL UNIQUE,
+  provider       TEXT,
+  provider_ref   TEXT,
+  failure_reason TEXT,
+  attempts       INTEGER NOT NULL DEFAULT 0,
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS refunds (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id          INTEGER NOT NULL UNIQUE REFERENCES orders(id),
+  payment_reference TEXT,
+  provider          TEXT,
+  amount_cents      INTEGER NOT NULL,
+  currency          TEXT NOT NULL,
+  status            TEXT NOT NULL CHECK (status IN ('pending','processing','processed','failed','manual')),
+  provider_ref      TEXT,
+  failure_reason    TEXT,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS order_events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,

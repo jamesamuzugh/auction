@@ -41,6 +41,9 @@ export type OrderStatus =
   | "paid"
   | "shipped"
   | "delivered"
+  | "disputed"
+  | "completed"
+  | "refunded"
   | "cancelled";
 
 export type Order = {
@@ -65,6 +68,10 @@ export type Order = {
   ship_country: string | null;
   carrier: string | null;
   tracking_number: string | null;
+  escrow_status: "none" | "held" | "frozen" | "released" | "refunded";
+  shipped_at: number | null;
+  delivered_at: number | null;
+  release_at: number | null;
   created_at: number;
   updated_at: number;
 };
@@ -317,7 +324,7 @@ export type ShippingAddress = {
   country: string;
 };
 
-function setStatus(db: DatabaseSync, orderId: number, status: OrderStatus, note: string, now: number) {
+export function setStatus(db: DatabaseSync, orderId: number, status: OrderStatus, note: string, now: number) {
   db.prepare(`UPDATE orders SET status = ?, updated_at = ? WHERE id = ?`).run(status, now, orderId);
   db.prepare(`INSERT INTO order_events (order_id, status, note, created_at) VALUES (?, ?, ?, ?)`).run(
     orderId,
@@ -327,7 +334,7 @@ function setStatus(db: DatabaseSync, orderId: number, status: OrderStatus, note:
   );
 }
 
-function requireOrder(db: DatabaseSync, orderId: number): Order {
+export function requireOrder(db: DatabaseSync, orderId: number): Order {
   const o = getOrder(db, orderId);
   if (!o) throw new AuctionError("Order not found.");
   return o;
@@ -371,12 +378,18 @@ export function setShippingAddress(db: DatabaseSync, orderId: number, userId: nu
   });
 }
 
-/** Seller confirms payment was received (offline payment for now). */
-export function markPaid(db: DatabaseSync, orderId: number, userId: number, now = Date.now()) {
+/**
+ * A Bidwell admin confirms that the winner paid into Bidwell's own account outside the site
+ * (bank transfer, cash). The money is then held in escrow exactly like an online payment.
+ * The caller must check the user is an admin.
+ */
+export function markPaidOffline(db: DatabaseSync, orderId: number, note: string, now = Date.now()) {
   const o = requireOrder(db, orderId);
-  if (o.seller_id !== userId) throw new AuctionError("Only the seller can confirm payment.");
   if (o.status !== "awaiting_payment") throw new AuctionError("This order isn't waiting for payment.");
-  tx(db, () => setStatus(db, orderId, "paid", "Seller confirmed payment. Preparing to ship.", now));
+  tx(db, () => {
+    db.prepare(`UPDATE orders SET escrow_status = 'held' WHERE id = ?`).run(orderId);
+    setStatus(db, orderId, "paid", `Bidwell confirmed payment of ${formatMoney(o.amount_cents)} received${note.trim() ? ` (${note.trim()})` : ""}. Held in escrow.`, now);
+  });
 }
 
 export function markShipped(
@@ -392,9 +405,10 @@ export function markShipped(
   if (o.status !== "paid") throw new AuctionError("Confirm payment before shipping.");
   if (!carrier.trim()) throw new AuctionError("Enter the shipping carrier or courier.");
   tx(db, () => {
-    db.prepare(`UPDATE orders SET carrier = ?, tracking_number = ? WHERE id = ?`).run(
+    db.prepare(`UPDATE orders SET carrier = ?, tracking_number = ?, shipped_at = ? WHERE id = ?`).run(
       carrier.trim(),
       tracking.trim() || null,
+      now,
       orderId
     );
     setStatus(
@@ -407,11 +421,22 @@ export function markShipped(
   });
 }
 
+/** How long after delivery is confirmed the buyer can still report a problem before funds go to the seller. */
+export const DISPUTE_WINDOW_MS = Number(process.env.DISPUTE_WINDOW_HOURS ?? 6) * 3_600_000;
+
 export function markDelivered(db: DatabaseSync, orderId: number, userId: number, now = Date.now()) {
   const o = requireOrder(db, orderId);
   if (o.buyer_id !== userId) throw new AuctionError("Only the winner can confirm delivery.");
   if (o.status !== "shipped") throw new AuctionError("The item hasn't shipped yet.");
-  tx(db, () => setStatus(db, orderId, "delivered", "Winner confirmed the item arrived.", now));
+  tx(db, () => confirmDelivery(db, o, now, "Winner confirmed the item arrived."));
+}
+
+/** Starts the dispute window. Used by the buyer's confirmation and by auto-confirmation. */
+export function confirmDelivery(db: DatabaseSync, o: Order, now: number, why: string) {
+  const releaseAt = now + DISPUTE_WINDOW_MS;
+  db.prepare(`UPDATE orders SET delivered_at = ?, release_at = ? WHERE id = ?`).run(now, releaseAt, o.id);
+  const hours = Math.round(DISPUTE_WINDOW_MS / 360_000) / 10;
+  setStatus(db, o.id, "delivered", `${why} Funds release to the seller in ${hours} hours unless a problem is reported.`, now);
 }
 
 /* -------------------------------- Payments -------------------------------- */
@@ -485,7 +510,14 @@ export function applyPaymentResult(
     );
     const o = getOrder(db, p.order_id)!;
     if (o.status === "awaiting_payment") {
-      setStatus(db, o.id, "paid", `Paid ${formatMoney(p.amount_cents)} via ${providerLabel} (ref ${p.reference}).`, now);
+      db.prepare(`UPDATE orders SET escrow_status = 'held' WHERE id = ?`).run(o.id);
+      setStatus(
+        db,
+        o.id,
+        "paid",
+        `Paid ${formatMoney(p.amount_cents)} via ${providerLabel} (ref ${p.reference}). Bidwell is holding it in escrow.`,
+        now
+      );
     }
     return { orderId: p.order_id, outcome: "paid" as const };
   });

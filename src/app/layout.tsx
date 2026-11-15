@@ -24,6 +24,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               <Link href="/sell">Sell an item</Link>
               {user ? (
                 <>
+                  {user.isAdmin && <Link href="/admin">Admin</Link>}
                   <Link href="/account">My account</Link>
                   <form action={logoutAction}>
                     <button className="btn link">Sign out</button>

@@ -7,7 +7,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { getDb } from "@/lib/db.ts";
-import { db, currentUser, SESSION_COOKIE, type FormState } from "@/lib/server.ts";
+import { db, currentUser, moveMoney, SESSION_COOKIE, type FormState } from "@/lib/server.ts";
 import { authenticate, createSession, deleteSession, registerUser } from "@/lib/users.ts";
 import {
   AuctionError,
@@ -20,13 +20,24 @@ import {
   getPayment,
   createAuction,
   markDelivered,
-  markPaid,
+  markPaidOffline,
   markShipped,
   parseMoney,
   placeBid,
   setShippingAddress,
 } from "@/lib/auctions.ts";
-import { availableProviders, getProvider } from "@/lib/payments/index.ts";
+import { getProvider } from "@/lib/payments/index.ts";
+import {
+  DISPUTE_REASONS,
+  markRefundDoneManually,
+  openDispute,
+  resolveDispute,
+  respondToDispute,
+  retryPayout,
+  retryRefund,
+  savePayoutAccount,
+  type Resolution,
+} from "@/lib/escrow.ts";
 
 const str = (f: FormData, k: string) => String(f.get(k) ?? "");
 
@@ -190,18 +201,6 @@ export async function shippingAction(_: FormState, f: FormData): Promise<FormSta
   return { ok: "Shipping address saved." };
 }
 
-export async function markPaidAction(_: FormState, f: FormData): Promise<FormState> {
-  const { user, orderId } = await orderUser(f);
-  try {
-    if (availableProviders(CURRENCY).length > 0)
-      throw new AuctionError("Payments are collected online, so they're confirmed automatically.");
-    markPaid(db(), orderId, user.id);
-  } catch (e) {
-    return fail(e);
-  }
-  revalidatePath(`/orders/${orderId}`);
-  return { ok: "Payment confirmed." };
-}
 
 export async function markShippedAction(_: FormState, f: FormData): Promise<FormState> {
   const { user, orderId } = await orderUser(f);
@@ -222,7 +221,7 @@ export async function markDeliveredAction(_: FormState, f: FormData): Promise<Fo
     return fail(e);
   }
   revalidatePath(`/orders/${orderId}`);
-  return { ok: "Thanks for confirming delivery." };
+  return { ok: "Thanks for confirming delivery. You can still report a problem for the next 6 hours." };
 }
 
 /* -------------------------------- Payments -------------------------------- */
@@ -271,4 +270,106 @@ export async function demoPayAction(f: FormData) {
     "demo checkout"
   );
   redirect(`/orders/${orderId}?payment=${outcome}`);
+}
+
+/* --------------------------------- Disputes -------------------------------- */
+
+export async function openDisputeAction(_: FormState, f: FormData): Promise<FormState> {
+  const { user, orderId } = await orderUser(f);
+  try {
+    const reason = str(f, "reason");
+    if (!DISPUTE_REASONS.includes(reason)) throw new AuctionError("Choose what went wrong.");
+    openDispute(db(), orderId, user.id, reason, str(f, "details"));
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath(`/orders/${orderId}`);
+  return { ok: "Problem reported. The money stays with Bidwell until we've reviewed it." };
+}
+
+export async function respondDisputeAction(_: FormState, f: FormData): Promise<FormState> {
+  const { user, orderId } = await orderUser(f);
+  try {
+    respondToDispute(db(), Number(str(f, "dispute_id")), user.id, str(f, "response"));
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath(`/orders/${orderId}`);
+  return { ok: "Response sent to Bidwell." };
+}
+
+async function adminUser() {
+  const user = await currentUser();
+  if (!user?.isAdmin) throw new AuctionError("Only Bidwell admins can do that.");
+  return user;
+}
+
+export async function resolveDisputeAction(_: FormState, f: FormData): Promise<FormState> {
+  const orderId = Number(str(f, "order_id"));
+  try {
+    const admin = await adminUser();
+    const outcome = str(f, "outcome") as Resolution;
+    if (!["refund", "release", "resume"].includes(outcome)) throw new AuctionError("Choose a decision.");
+    resolveDispute(db(), Number(str(f, "dispute_id")), admin.id, outcome, str(f, "note"));
+  } catch (e) {
+    return fail(e);
+  }
+  await moveMoney();
+  revalidatePath(`/orders/${orderId}`);
+  revalidatePath("/admin");
+  return { ok: "Decision recorded." };
+}
+
+export async function adminMarkPaidAction(_: FormState, f: FormData): Promise<FormState> {
+  const orderId = Number(str(f, "order_id"));
+  try {
+    await adminUser();
+    markPaidOffline(db(), orderId, str(f, "note"));
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath("/admin");
+  revalidatePath(`/orders/${orderId}`);
+  return { ok: "Payment recorded and held in escrow." };
+}
+
+export async function adminMoneyAction(_: FormState, f: FormData): Promise<FormState> {
+  try {
+    await adminUser();
+    const id = Number(str(f, "id"));
+    const op = str(f, "op");
+    if (op === "retry_payout") retryPayout(getDb(), id);
+    else if (op === "retry_refund") retryRefund(getDb(), id);
+    else if (op === "refund_done") markRefundDoneManually(getDb(), id);
+    else if (op !== "run") throw new AuctionError("Unknown action.");
+    db();
+    await moveMoney();
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath("/admin");
+  return { ok: "Done." };
+}
+
+/* ---------------------------------- Payouts --------------------------------- */
+
+export async function savePayoutAccountAction(_: FormState, f: FormData): Promise<FormState> {
+  const user = await currentUser();
+  if (!user) redirect("/login?next=/account/payouts");
+  try {
+    const [bankCode, bankName] = str(f, "bank").split("|");
+    const method = str(f, "method") === "bank" ? "bank" : "mobile_money";
+    savePayoutAccount(getDb(), user.id, {
+      method,
+      bankCode: bankCode ?? "",
+      bankName: bankName ?? "",
+      accountNumber: str(f, "account_number"),
+      accountName: str(f, "account_name"),
+    });
+  } catch (e) {
+    return fail(e);
+  }
+  await moveMoney();
+  revalidatePath("/account/payouts");
+  return { ok: "Payout details saved. Released funds will be sent here." };
 }

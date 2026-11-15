@@ -132,3 +132,22 @@ table.list tr:last-child td { border-bottom: none; }
 .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
 .tabs a { padding: 8px 12px; text-decoration: none; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; font-weight: 600; }
 .tabs a.on { color: var(--text); border-color: var(--accent); }
+
+.btn.danger { background: var(--err); border-color: var(--err); color: #fff; }
+.steps .s.hold { border-color: var(--err); color: var(--err); font-weight: 700; }
+.escrow { display: grid; gap: 4px; border-color: var(--accent); background: var(--accent-soft); }
+.escrow p { margin: 0; }
+.dispute { display: grid; gap: 8px; }
+.dispute.open { border-color: var(--err); }
+.dispute p { margin: 0; }
+.quote { border-left: 3px solid var(--border); padding-left: 12px; display: grid; gap: 2px; }
+.pre { white-space: pre-wrap; }
+fieldset.choices { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; display: grid; gap: 8px; margin: 0; }
+fieldset.choices legend { font-weight: 600; font-size: 14px; padding: 0 4px; }
+label.choice { display: flex; gap: 8px; align-items: center; font-weight: 500; }
+label.choice input { width: auto; }
+details > summary { cursor: pointer; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.stats .card { padding: 14px 16px; display: grid; gap: 2px; }
+.stats .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+form.inline { display: inline; }

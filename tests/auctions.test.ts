@@ -9,7 +9,7 @@ import {
   getAuction,
   getOrderForAuction,
   setShippingAddress,
-  markPaid,
+  markPaidOffline,
   markShipped,
   markDelivered,
   minimumNextBid,
@@ -97,7 +97,7 @@ test("closing picks the highest bidder and the order runs through to delivery", 
   assert.equal(o.amount_cents, 12_000);
   assert.equal(o.status, "awaiting_address");
 
-  assert.throws(() => markPaid(db, o.id, seller.id), /isn't waiting for payment/);
+  assert.throws(() => markPaidOffline(db, o.id, ""), /isn't waiting for payment/);
   assert.throws(
     () => setShippingAddress(db, o.id, alice.id, { name: "x", phone: "1", line1: "a", city: "c", region: "r", country: "k" }),
     /Only the winner/
@@ -111,8 +111,8 @@ test("closing picks the highest bidder and the order runs through to delivery", 
     country: "Ghana",
   });
   assert.equal(getOrderForAuction(db, id)!.status, "awaiting_payment");
-  assert.throws(() => markPaid(db, o.id, bob.id), /Only the seller/);
-  markPaid(db, o.id, seller.id);
+  markPaidOffline(db, o.id, "bank transfer");
+  assert.equal(getOrderForAuction(db, id)!.escrow_status, "held");
   assert.throws(() => markDelivered(db, o.id, bob.id), /hasn't shipped/);
   markShipped(db, o.id, seller.id, "DHL", "TRACK123");
   assert.throws(
@@ -122,6 +122,7 @@ test("closing picks the highest bidder and the order runs through to delivery", 
   markDelivered(db, o.id, bob.id);
   const done = getOrderForAuction(db, id)!;
   assert.equal(done.status, "delivered");
+  assert.ok(done.release_at! > Date.now());
   assert.equal(done.tracking_number, "TRACK123");
   assert.deepEqual(
     orderEvents(db, o.id).map((e) => e.status),

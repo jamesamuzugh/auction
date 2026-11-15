@@ -34,6 +34,9 @@ export const ORDER_LABEL: Record<string, string> = {
   awaiting_payment: "Awaiting payment",
   paid: "Paid, preparing to ship",
   shipped: "Shipped",
-  delivered: "Delivered",
+  delivered: "Delivered, in the 6-hour check period",
+  disputed: "Problem reported, under review",
+  completed: "Complete, seller paid",
+  refunded: "Refunded to the winner",
   cancelled: "Cancelled",
 };

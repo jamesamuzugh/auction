@@ -2,8 +2,28 @@
 
 An auction site for (mostly used) items. Sellers list an item with a **starting bid**, a
 **minimum bid increment** and a **fixed end time**. Buyers bid; when the time runs out the
-highest bidder wins, adds a shipping address, pays online through **Paystack**, and the seller
-ships with tracking until the buyer confirms delivery.
+highest bidder wins, adds a shipping address and pays **Bidwell** through **Paystack**. Bidwell
+holds the money in **escrow** while the seller ships, and only pays the seller once the buyer
+confirms delivery and **6 hours pass without a reported problem**.
+
+## How escrow works
+
+| Step | Money |
+| --- | --- |
+| Winner pays | Held by Bidwell (`escrow_status = held`) |
+| Seller ships with carrier + tracking | Still held |
+| Winner confirms delivery (or 7 days pass after shipping) | Still held; 6-hour dispute window starts |
+| 6 hours pass with no report | Released: payout to the seller, less `PLATFORM_FEE_PERCENT` |
+| Winner reports a problem (any time after paying, until the window ends) | Frozen until an admin decides |
+| Admin decides | Refund the winner, pay the seller, or let the order continue |
+
+- Payouts go to the seller's bank account or mobile money wallet via Paystack Transfers;
+  refunds go back through Paystack Refunds. Both are queued, claimed before sending (so they
+  can't double-send) and confirmed by webhook; failures show on `/admin` with a Retry button.
+- `/admin` (emails in `ADMIN_EMAILS`) shows held and frozen money, open reports, payouts,
+  refunds, and lets an admin record an offline payment made into Bidwell's own account.
+- Releases happen on page loads and from `GET /api/cron/escrow` (send
+  `Authorization: Bearer $CRON_SECRET`); schedule that every 5 minutes in production.
 
 ## Features
 
@@ -17,12 +37,14 @@ ships with tracking until the buyer confirms delivery.
   bidder names are masked (`E***r`)
 - Automatic close: due auctions are closed on the next request, the winner is recorded and an
   order is opened
-- Order tracking: address → payment → paid → shipped (carrier + tracking number) → delivered,
-  with a history log visible only to the buyer and seller
+- Order tracking: address → payment → paid → shipped (carrier + tracking number) → delivered →
+  seller paid, with a history log visible only to the buyer, the seller and admins
+- Escrow, disputes, seller payouts and refunds (see above); sellers manage payout details and see
+  held/paid amounts at `/account/payouts`
 - Payments: Paystack checkout, callback verification and signed webhooks; amounts and currency
   are re-checked with Paystack before an order is marked paid. Other providers plug into
-  `src/lib/payments/` (see `types.ts`). If no provider is configured the seller confirms
-  payment by hand instead.
+  `src/lib/payments/` (see `types.ts`). If no provider is configured, an admin can record a
+  payment made offline into Bidwell's account.
 - My account page: items won, auctions you're bidding on (leading / outbid), your listings
 
 ## Stack
@@ -50,6 +72,8 @@ instead.
    `sk_test_…` key while testing.
 2. Set `PAYSTACK_SECRET_KEY` and `APP_URL` in `.env.local`.
 3. Set the webhook URL in the dashboard to `<APP_URL>/api/payments/paystack/webhook`.
+4. For automatic seller payouts, turn off transfer OTP ("Confirm transfers before sending") in
+   Paystack, and keep enough in your Paystack balance to cover payouts.
 
 To try the full flow without keys, set `PAYMENTS_DEMO=1` to get a pretend checkout. Never turn
 that on in production.
@@ -60,13 +84,14 @@ that on in production.
 npm test
 ```
 
-Covers bid rules, closing and winner selection, the order/shipping state machine, payment
+Covers escrow holds and releases, the 6-hour window, auto-confirmation, disputes (refund /
+release / resume), payout and refund processing and retries, bid rules, closing and winner selection, the order/shipping state machine, payment
 recording (double notifications, underpayment, wrong currency) and the Paystack client
 (endpoint calls and webhook signatures).
 
 ## Not built yet
 
-- Paying sellers out (Paystack subaccounts/split payments, or manual payouts) and a platform fee
 - Email/SMS notifications (outbid, won, shipped)
 - Anti-sniping (extending the end time when a bid lands in the last minutes)
-- Admin moderation of listings and disputes
+- Admin moderation of listings, and photo uploads on dispute reports
+- Verifying payout account names with Paystack before saving
