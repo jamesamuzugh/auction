@@ -7,6 +7,7 @@ import {
   createAuction,
   createPayment,
   getOrderForAuction,
+  addDeliveryPartner,
   markShipped,
   placeBid,
   setShippingAddress,
@@ -24,6 +25,8 @@ const seller = user("seller@example.com", "Ama Seller");
 const buyer = user("buyer@example.com", "Kofi Buyer");
 const other = user("bidder@example.com", "Esi Bidder");
 user("admin@example.com", "Bidwell Admin"); // add admin@example.com to ADMIN_EMAILS
+const rider = user("rider@example.com", "Kwame Rider");
+addDeliveryPartner(db, "rider@example.com", "Speedaf Express");
 
 const now = Date.now();
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
@@ -66,8 +69,8 @@ ended.forEach(([title, category, start, description], i) => {
   if (i === 1) {
     const p = createPayment(db, o.id, buyer.id, "demo", process.env.NEXT_PUBLIC_CURRENCY ?? "GHS");
     applyPaymentResult(db, p.reference, { status: "success", amountCents: p.amount_cents, currency: p.currency }, "demo checkout");
-    markShipped(db, o.id, seller.id, "DHL", "GH4471902");
+    markShipped(db, o.id, seller.id, rider.id, "GH4471902");
   }
 });
 
-console.log("Seeded. Sign in as seller@example.com, buyer@example.com or bidder@example.com with password123 (admin: admin@example.com).");
+console.log("Seeded. Sign in as seller@example.com, buyer@example.com or bidder@example.com with password123 (admin: admin@example.com, delivery partner: rider@example.com).");

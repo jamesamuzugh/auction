@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "seed": "node --no-warnings --experimental-strip-types scripts/seed.ts",
+    "seed": "NEXT_PUBLIC_CURRENCY=${NEXT_PUBLIC_CURRENCY:-GHS} node --no-warnings --experimental-strip-types scripts/seed.ts",
     "test": "node --no-warnings --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {

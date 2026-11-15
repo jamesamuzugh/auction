@@ -11,7 +11,8 @@ import {
   setShippingAddress,
   markPaidOffline,
   markShipped,
-  markDelivered,
+  confirmDeliveryByPartner,
+  addDeliveryPartner,
   minimumNextBid,
   parseMoney,
   orderEvents,
@@ -113,14 +114,20 @@ test("closing picks the highest bidder and the order runs through to delivery", 
   assert.equal(getOrderForAuction(db, id)!.status, "awaiting_payment");
   markPaidOffline(db, o.id, "bank transfer");
   assert.equal(getOrderForAuction(db, id)!.escrow_status, "held");
-  assert.throws(() => markDelivered(db, o.id, bob.id), /hasn't shipped/);
-  markShipped(db, o.id, seller.id, "DHL", "TRACK123");
+  const rider = registerUser(db, "rider@example.com", "Rider", "password123");
+  addDeliveryPartner(db, "rider@example.com", "DHL");
+  assert.throws(() => markShipped(db, o.id, seller.id, alice.id, "TRACK123"), /delivery partner/);
+  markShipped(db, o.id, seller.id, rider.id, "TRACK123");
   assert.throws(
     () => setShippingAddress(db, o.id, bob.id, { name: "Bob", phone: "1", line1: "a", city: "c", region: "r", country: "k" }),
     /already shipped/
   );
-  markDelivered(db, o.id, bob.id);
+  const code = getOrderForAuction(db, id)!.delivery_code!;
+  assert.match(code, /^\d{6}$/);
+  assert.throws(() => confirmDeliveryByPartner(db, o.id, bob.id, { method: "code", code, recipientName: "Bob" }), /isn't assigned/);
+  confirmDeliveryByPartner(db, o.id, rider.id, { method: "code", code, recipientName: "Bob" });
   const done = getOrderForAuction(db, id)!;
+  assert.equal(done.delivery_method, "code");
   assert.equal(done.status, "delivered");
   assert.ok(done.release_at! > Date.now());
   assert.equal(done.tracking_number, "TRACK123");

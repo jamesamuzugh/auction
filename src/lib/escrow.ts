@@ -10,15 +10,11 @@
 import type { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 import { tx } from "./db.ts";
-import { AuctionError, confirmDelivery, getOrder, requireOrder, setStatus, type Order, type OrderStatus } from "./auctions.ts";
+import { AuctionError, getOrder, requireOrder, setStatus, type Order, type OrderStatus } from "./auctions.ts";
 import { formatMoney } from "./money.ts";
 import type { PaymentProvider } from "./payments/types.ts";
 
 const HOUR = 3_600_000;
-const DAY = 24 * HOUR;
-
-/** Days after shipping before delivery is confirmed for a buyer who never clicks "received". */
-export const AUTO_CONFIRM_MS = Number(process.env.AUTO_CONFIRM_DAYS ?? 7) * DAY;
 
 /** Bidwell's cut of each sale, in percent. */
 export function feePercent(): number {
@@ -101,6 +97,20 @@ function event(db: DatabaseSync, orderId: number, status: string, note: string, 
 }
 
 /* --------------------------------- Disputes -------------------------------- */
+
+/**
+ * After the delivery partner confirms delivery, the winner says the item is as expected. That
+ * ends the dispute window early and releases the money to the seller straight away.
+ */
+export function acceptItem(db: DatabaseSync, orderId: number, userId: number, now = Date.now()) {
+  const o = requireOrder(db, orderId);
+  if (o.buyer_id !== userId) throw new AuctionError("Only the winner can accept the item.");
+  if (o.status !== "delivered" || o.escrow_status !== "held") throw new AuctionError("You can accept the item once it has been delivered.");
+  tx(db, () => {
+    db.prepare(`UPDATE orders SET accepted_at = ? WHERE id = ?`).run(now, o.id);
+    release(db, o, now, "Winner confirmed the item is in good condition and as described.");
+  });
+}
 
 export function canDispute(o: Order, now = Date.now()): boolean {
   if (o.status === "paid" || o.status === "shipped") return true;
@@ -262,22 +272,10 @@ function currencyOf(db: DatabaseSync, o: Order): string {
 }
 
 /**
- * Time-based steps. Safe to run as often as you like (it runs on page loads and from the cron
- * endpoint):
- * - shipped orders the buyer never confirmed are confirmed AUTO_CONFIRM_DAYS after shipping
- * - delivered orders whose dispute window has passed release their funds to the seller
+ * Releases delivered orders whose 6-hour window passed with no acceptance and no report.
+ * Safe to run as often as you like (it runs on page loads and from the cron endpoint).
  */
-export function runEscrowTimers(db: DatabaseSync, now = Date.now()): { autoConfirmed: number; released: number } {
-  const stale = db
-    .prepare(`SELECT id FROM orders WHERE status = 'shipped' AND shipped_at IS NOT NULL AND shipped_at <= ?`)
-    .all(now - AUTO_CONFIRM_MS) as { id: number }[];
-  for (const { id } of stale) {
-    tx(db, () => {
-      const o = getOrder(db, id);
-      if (o?.status === "shipped")
-        confirmDelivery(db, o, now, `Delivery confirmed automatically ${Math.round(AUTO_CONFIRM_MS / DAY)} days after shipping.`);
-    });
-  }
+export function runEscrowTimers(db: DatabaseSync, now = Date.now()): { released: number } {
   const due = db
     .prepare(`SELECT id FROM orders WHERE status = 'delivered' AND escrow_status = 'held' AND release_at <= ?`)
     .all(now) as { id: number }[];
@@ -285,10 +283,10 @@ export function runEscrowTimers(db: DatabaseSync, now = Date.now()): { autoConfi
     tx(db, () => {
       const o = getOrder(db, id);
       if (o?.status === "delivered" && o.escrow_status === "held")
-        release(db, o, now, "No problem was reported within the dispute window.");
+        release(db, o, now, "No problem was reported within 6 hours of delivery.");
     });
   }
-  return { autoConfirmed: stale.length, released: due.length };
+  return { released: due.length };
 }
 
 /* ---------------------------------- Payouts --------------------------------- */

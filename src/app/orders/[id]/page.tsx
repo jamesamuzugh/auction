@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { db, moveMoney, requireUser } from "@/lib/server.ts";
-import { getOrder, orderEvents } from "@/lib/auctions.ts";
+import { getOrder, listDeliveryPartners, orderEvents } from "@/lib/auctions.ts";
 import { formatMoney, CURRENCY } from "@/lib/money.ts";
 import { ORDER_LABEL, ORDER_STEPS, dateTime } from "@/lib/format.ts";
 import {
@@ -15,9 +15,10 @@ import {
 } from "@/lib/escrow.ts";
 import { availableProviders } from "@/lib/payments/index.ts";
 import {
+  AcceptForm,
   AddressForm,
+  AdminDeliveryForm,
   AdminMarkPaidForm,
-  DeliveredForm,
   DisputeForm,
   PayForm,
   ResolveForm,
@@ -111,16 +112,19 @@ export default async function OrderPage({
             <p>Payment is frozen while Bidwell reviews the reported problem. Nobody can move it until a decision is made.</p>
           ) : releaseWindowOpen ? (
             <p>
-              Delivery confirmed. The seller is paid in <Countdown endsAt={o.release_at!} refreshOnEnd /> ({dateTime(o.release_at!)}) unless
-              the winner reports a problem before then.
+              Delivered. The seller is paid automatically in <Countdown endsAt={o.release_at!} refreshOnEnd /> ({dateTime(o.release_at!)})
+              unless the winner reports a problem first, or straight away if the winner accepts the item.
             </p>
           ) : isBuyer ? (
-            <p>The seller doesn&apos;t get your money until you confirm the item arrived as described, plus 6 hours to report any problem.</p>
+            <p>
+              The seller doesn&apos;t get your money until our delivery partner confirms delivery. You then have 6 hours to check the
+              item and accept it or report a problem.
+            </p>
           ) : (
             <p>
               You&apos;ll be paid {formatMoney(o.amount_cents - fee)}
-              {fee > 0 && <> (after the {formatMoney(fee)} Bidwell fee)</>} 6 hours after the winner confirms delivery. If they don&apos;t
-              confirm, delivery is confirmed automatically 7 days after you ship.
+              {fee > 0 && <> (after the {formatMoney(fee)} Bidwell fee)</>} once the delivery partner confirms delivery and the winner
+              accepts the item, or 6 hours after delivery if they don&apos;t report a problem.
             </p>
           )}
         </div>
@@ -146,27 +150,56 @@ export default async function OrderPage({
         </div>
       )}
       {isBuyer && o.status === "shipped" && (
-        <div className="card pad">
-          <h2 style={{ marginTop: 0 }}>Your item is on its way</h2>
-          <p style={{ marginTop: 0 }}>
-            Shipped with <strong>{o.carrier}</strong>
+        <div className="card pad" style={{ display: "grid", gap: 8 }}>
+          <h2 style={{ margin: 0 }}>Your item is on its way</h2>
+          <p style={{ margin: 0 }}>
+            With <strong>{o.carrier}</strong>
             {o.tracking_number && <> · Tracking number <strong>{o.tracking_number}</strong></>}
           </p>
-          <DeliveredForm orderId={o.id} />
+          <div className="small muted">Your delivery code</div>
+          <div className="delivery-code">{o.delivery_code}</div>
+          <p className="small muted" style={{ margin: 0 }}>
+            Give this code to the delivery partner only when you have the parcel in your hands. If you can&apos;t, you can sign for it
+            instead. Don&apos;t share it with anyone else.
+          </p>
+        </div>
+      )}
+      {isBuyer && o.status === "delivered" && o.escrow_status === "held" && (
+        <div className="card pad" style={{ display: "grid", gap: 8 }}>
+          <h2 style={{ margin: 0 }}>Check your item</h2>
+          <p style={{ margin: 0 }}>
+            If it&apos;s in good condition and as described, accept it and the seller is paid now. If something is wrong, report a
+            problem below before <strong>{dateTime(o.release_at!)}</strong>. If you do neither, the seller is paid then.
+          </p>
+          <AcceptForm orderId={o.id} />
         </div>
       )}
       {isSeller && o.status === "awaiting_address" && <div className="card pad muted">Waiting for the winner to add their shipping address.</div>}
       {isSeller && o.status === "awaiting_payment" && <div className="card pad muted">Waiting for the winner to pay. Don&apos;t ship until this order shows as paid.</div>}
       {isSeller && o.status === "paid" && (
-        <div className="card pad"><h2 style={{ marginTop: 0 }}>Ship the item</h2><ShipForm orderId={o.id} /></div>
+        <div className="card pad">
+          <h2 style={{ marginTop: 0 }}>Ship the item</h2>
+          <ShipForm orderId={o.id} partners={listDeliveryPartners(d).map((p) => ({ id: p.id, label: p.company ? `${p.company} (${p.name})` : p.name }))} />
+        </div>
       )}
       {isSeller && o.status === "shipped" && (
         <div className="card pad">
           <h2 style={{ marginTop: 0 }}>Shipped</h2>
           <p style={{ margin: 0 }}>
             Sent with <strong>{o.carrier}</strong>
-            {o.tracking_number && <> · Tracking number <strong>{o.tracking_number}</strong></>}. Waiting for the winner to confirm it arrived.
+            {o.tracking_number && <> · Tracking number <strong>{o.tracking_number}</strong></>}. Waiting for the delivery partner to
+            confirm delivery.
           </p>
+        </div>
+      )}
+      {me.isAdmin && o.status === "shipped" && (
+        <div className="card pad">
+          <h2 style={{ marginTop: 0 }}>Admin: confirm delivery by hand</h2>
+          <p className="small muted" style={{ marginTop: 0 }}>
+            Only when the partner can&apos;t confirm in the app but has proof. Code: <strong>{o.delivery_code}</strong>
+            {o.delivery_code_attempts > 0 && <> · {o.delivery_code_attempts} wrong code attempts</>}
+          </p>
+          <AdminDeliveryForm orderId={o.id} />
         </div>
       )}
       {me.isAdmin && o.status === "awaiting_payment" && (
@@ -226,6 +259,22 @@ export default async function OrderPage({
       )}
       {isSeller && !getPayoutAccount(d, me.id) && ["paid", "shipped", "delivered"].includes(o.status) && (
         <div className="msg err">Add your <Link href="/account/payouts">payout details</Link> so we can pay you when this order completes.</div>
+      )}
+
+      {o.delivery_method && (
+        <div className="card pad" style={{ display: "grid", gap: 6 }}>
+          <h2 style={{ margin: 0 }}>Proof of delivery</h2>
+          <div>
+            {o.delivery_method === "code" && <>Delivery code given by <strong>{o.delivery_recipient}</strong></>}
+            {o.delivery_method === "signature" && <>Signed for by <strong>{o.delivery_recipient}</strong></>}
+            {o.delivery_method === "admin" && <>Confirmed by Bidwell: {o.delivery_recipient}</>}
+            {o.delivered_at && <span className="muted"> · {dateTime(o.delivered_at)} · {o.carrier}</span>}
+          </div>
+          {o.delivery_signature && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={o.delivery_signature} alt={`Signature of ${o.delivery_recipient}`} className="sigimg" />
+          )}
+        </div>
       )}
 
       {o.ship_line1 && (isBuyer || isSeller || me.isAdmin) && (

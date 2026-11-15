@@ -11,13 +11,15 @@ import {
   createAuction,
   createPayment,
   getOrder,
-  markDelivered,
+  addDeliveryPartner,
+  confirmDeliveryByPartner,
   markShipped,
   orderEvents,
   placeBid,
   setShippingAddress,
 } from "../src/lib/auctions.ts";
 import {
+  acceptItem,
   applyTransferResult,
   getPayoutForOrder,
   getRefundForOrder,
@@ -44,6 +46,8 @@ function paidOrder() {
   const seller = registerUser(db, "s@example.com", "Seller", "password123");
   const buyer = registerUser(db, "b@example.com", "Buyer", "password123");
   const admin = registerUser(db, "admin@example.com", "Admin", "password123");
+  const rider = registerUser(db, "rider@example.com", "Rider", "password123");
+  addDeliveryPartner(db, "rider@example.com", "Speedaf");
   const t0 = Date.now() - 48 * HOUR;
   const aid = createAuction(
     db,
@@ -57,21 +61,25 @@ function paidOrder() {
   setShippingAddress(db, orderId, buyer.id, addr, t0 + HOUR);
   const p = createPayment(db, orderId, buyer.id, "demo", "GHS", t0 + HOUR);
   applyPaymentResult(db, p.reference, { status: "success", amountCents: 10_000, currency: "GHS" }, "demo", t0 + HOUR);
-  return { db, seller, buyer, admin, orderId, ref: p.reference };
+  /** Seller hands over to the partner, partner delivers with the winner's code. */
+  const shipAndDeliver = (t = Date.now()) => {
+    markShipped(db, orderId, seller.id, rider.id, "", t);
+    confirmDeliveryByPartner(db, orderId, rider.id, { method: "code", code: getOrder(db, orderId)!.delivery_code!, recipientName: "Buyer" }, t);
+  };
+  return { db, seller, buyer, admin, rider, orderId, ref: p.reference, shipAndDeliver };
 }
 
 test("payment is held in escrow, then released 6 hours after delivery with the fee taken off", async () => {
   process.env.PLATFORM_FEE_PERCENT = "5";
-  const { db, seller, buyer, orderId } = paidOrder();
+  const { db, seller, orderId, shipAndDeliver } = paidOrder();
   assert.equal(getOrder(db, orderId)!.escrow_status, "held");
   const t = Date.now();
-  markShipped(db, orderId, seller.id, "DHL", "X1", t);
-  markDelivered(db, orderId, buyer.id, t);
+  shipAndDeliver(t);
   assert.equal(getOrder(db, orderId)!.release_at, t + 6 * HOUR);
 
-  assert.deepEqual(runEscrowTimers(db, t + 6 * HOUR - 1), { autoConfirmed: 0, released: 0 });
+  assert.deepEqual(runEscrowTimers(db, t + 6 * HOUR - 1), { released: 0 });
   assert.equal(getPayoutForOrder(db, orderId), undefined);
-  assert.deepEqual(runEscrowTimers(db, t + 6 * HOUR), { autoConfirmed: 0, released: 1 });
+  assert.deepEqual(runEscrowTimers(db, t + 6 * HOUR), { released: 1 });
   const o = getOrder(db, orderId)!;
   assert.equal(o.status, "completed");
   assert.equal(o.escrow_status, "released");
@@ -95,21 +103,47 @@ test("payment is held in escrow, then released 6 hours after delivery with the f
   process.env.PLATFORM_FEE_PERCENT = "0";
 });
 
-test("buyers who never confirm are auto-confirmed after 7 days, then the window runs", () => {
-  const { db, seller, orderId } = paidOrder();
-  const t = Date.now();
-  markShipped(db, orderId, seller.id, "DHL", "", t);
-  assert.equal(runEscrowTimers(db, t + 7 * 24 * HOUR - 1).autoConfirmed, 0);
-  assert.equal(runEscrowTimers(db, t + 7 * 24 * HOUR).autoConfirmed, 1);
-  assert.equal(getOrder(db, orderId)!.status, "delivered");
-  assert.equal(runEscrowTimers(db, t + 7 * 24 * HOUR + 6 * HOUR).released, 1);
+test("buyer accepting the item pays the seller at once; without it, release waits 6 hours", () => {
+  const { db, buyer, seller, orderId, shipAndDeliver } = paidOrder();
+  assert.throws(() => acceptItem(db, orderId, buyer.id), /once it has been delivered/);
+  shipAndDeliver();
+  assert.throws(() => acceptItem(db, orderId, seller.id), /Only the winner/);
+  acceptItem(db, orderId, buyer.id);
+  assert.equal(getOrder(db, orderId)!.status, "completed");
+  assert.ok(getOrder(db, orderId)!.accepted_at);
+  assert.equal(getPayoutForOrder(db, orderId)!.gross_cents, 10_000);
+  assert.throws(() => acceptItem(db, orderId, buyer.id), /once it has been delivered/);
+
+  // Shipped but never delivered: nothing is released, however long it waits.
+  const b = paidOrder();
+  markShipped(b.db, b.orderId, b.seller.id, b.rider.id, "");
+  assert.equal(runEscrowTimers(b.db, Date.now() + 60 * 24 * HOUR).released, 0);
+});
+
+test("delivery partner needs the right code or a signature, with limited code attempts", () => {
+  const { db, seller, buyer, rider, orderId } = paidOrder();
+  markShipped(db, orderId, seller.id, rider.id, "");
+  const code = getOrder(db, orderId)!.delivery_code!;
+  const wrong = code === "000000" ? "111111" : "000000";
+  assert.throws(() => confirmDeliveryByPartner(db, orderId, buyer.id, { method: "code", code, recipientName: "B" }), /isn't assigned/);
+  assert.throws(() => confirmDeliveryByPartner(db, orderId, rider.id, { method: "code", code, recipientName: " " }), /name/);
+  for (let i = 4; i >= 1; i--)
+    assert.throws(() => confirmDeliveryByPartner(db, orderId, rider.id, { method: "code", code: wrong, recipientName: "B" }), new RegExp(`${i} tr`));
+  assert.throws(() => confirmDeliveryByPartner(db, orderId, rider.id, { method: "code", code: wrong, recipientName: "B" }), /signature instead/);
+  assert.throws(() => confirmDeliveryByPartner(db, orderId, rider.id, { method: "code", code, recipientName: "B" }), /signature instead/);
+  assert.throws(() => confirmDeliveryByPartner(db, orderId, rider.id, { method: "signature", signature: "data:image/png;base64,xx", recipientName: "B" }), /sign/);
+  const sig = "data:image/png;base64," + "A".repeat(400);
+  confirmDeliveryByPartner(db, orderId, rider.id, { method: "signature", signature: sig, recipientName: "Kofi" });
+  const o = getOrder(db, orderId)!;
+  assert.equal(o.status, "delivered");
+  assert.equal(o.delivery_method, "signature");
+  assert.equal(o.delivery_recipient, "Kofi");
 });
 
 test("a dispute inside the window freezes the money; after the window it's refused", () => {
-  const { db, seller, buyer, orderId } = paidOrder();
+  const { db, seller, buyer, orderId, shipAndDeliver } = paidOrder();
   const t = Date.now();
-  markShipped(db, orderId, seller.id, "DHL", "", t);
-  markDelivered(db, orderId, buyer.id, t);
+  shipAndDeliver(t);
   assert.throws(() => openDispute(db, orderId, seller.id, "Other", "Seller trying", t), /Only the winner/);
   assert.throws(() => openDispute(db, orderId, buyer.id, "Item arrived damaged", "short", t), /sentence/);
   openDispute(db, orderId, buyer.id, "Item arrived damaged", "The screen is cracked in two places.", t + HOUR);
@@ -119,8 +153,7 @@ test("a dispute inside the window freezes the money; after the window it's refus
   assert.equal(runEscrowTimers(db, t + 10 * HOUR).released, 0);
 
   const late = paidOrder();
-  markShipped(late.db, late.orderId, late.seller.id, "DHL", "", t);
-  markDelivered(late.db, late.orderId, late.buyer.id, t);
+  late.shipAndDeliver(t);
   assert.throws(
     () => openDispute(late.db, late.orderId, late.buyer.id, "Other", "Changed my mind about it.", t + 6 * HOUR),
     /time to report a problem has passed/
@@ -161,9 +194,8 @@ test("admin can release to the seller or let the order carry on", () => {
 });
 
 test("failed transfers are recorded and can be retried; webhooks settle processing ones", async () => {
-  const { db, seller, buyer, orderId } = paidOrder();
-  markShipped(db, orderId, seller.id, "DHL", "");
-  markDelivered(db, orderId, buyer.id);
+  const { db, seller, orderId, shipAndDeliver } = paidOrder();
+  shipAndDeliver();
   runEscrowTimers(db, Date.now() + 7 * HOUR);
   savePayoutAccount(db, seller.id, momo);
   const failing = { ...demo, payouts: { ...demo.payouts!, transfer: async () => ({ status: "failed" as const, message: "Insufficient balance" }) } } as PaymentProvider;

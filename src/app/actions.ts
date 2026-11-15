@@ -19,7 +19,10 @@ import {
   createPayment,
   getPayment,
   createAuction,
-  markDelivered,
+  addDeliveryPartner,
+  adminConfirmDelivery,
+  confirmDeliveryByPartner,
+  removeDeliveryPartner,
   markPaidOffline,
   markShipped,
   parseMoney,
@@ -29,6 +32,7 @@ import {
 import { getProvider } from "@/lib/payments/index.ts";
 import {
   DISPUTE_REASONS,
+  acceptItem,
   markRefundDoneManually,
   openDispute,
   resolveDispute,
@@ -205,23 +209,68 @@ export async function shippingAction(_: FormState, f: FormData): Promise<FormSta
 export async function markShippedAction(_: FormState, f: FormData): Promise<FormState> {
   const { user, orderId } = await orderUser(f);
   try {
-    markShipped(db(), orderId, user.id, str(f, "carrier"), str(f, "tracking"));
+    markShipped(db(), orderId, user.id, Number(str(f, "courier_id")), str(f, "tracking"));
   } catch (e) {
     return fail(e);
   }
   revalidatePath(`/orders/${orderId}`);
-  return { ok: "Marked as shipped." };
+  return { ok: "Handed to the delivery partner." };
 }
 
-export async function markDeliveredAction(_: FormState, f: FormData): Promise<FormState> {
+export async function acceptItemAction(_: FormState, f: FormData): Promise<FormState> {
   const { user, orderId } = await orderUser(f);
   try {
-    markDelivered(db(), orderId, user.id);
+    acceptItem(db(), orderId, user.id);
+  } catch (e) {
+    return fail(e);
+  }
+  await moveMoney();
+  revalidatePath(`/orders/${orderId}`);
+  return { ok: "Thanks! The seller has been paid." };
+}
+
+/** The delivery partner confirms handover with the winner's code or signature. */
+export async function partnerDeliverAction(_: FormState, f: FormData): Promise<FormState> {
+  const user = await currentUser();
+  if (!user) redirect("/login?next=/deliveries");
+  const orderId = Number(str(f, "order_id"));
+  try {
+    if (user.role !== "courier") throw new AuctionError("Only delivery partners can confirm deliveries.");
+    const recipientName = str(f, "recipient");
+    if (str(f, "method") === "signature") {
+      confirmDeliveryByPartner(db(), orderId, user.id, { method: "signature", signature: str(f, "signature"), recipientName });
+    } else {
+      confirmDeliveryByPartner(db(), orderId, user.id, { method: "code", code: str(f, "code"), recipientName });
+    }
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath("/deliveries");
+  return { ok: `Order #${orderId} marked as delivered.` };
+}
+
+export async function adminConfirmDeliveryAction(_: FormState, f: FormData): Promise<FormState> {
+  const orderId = Number(str(f, "order_id"));
+  try {
+    await adminUser();
+    adminConfirmDelivery(db(), orderId, str(f, "note"));
   } catch (e) {
     return fail(e);
   }
   revalidatePath(`/orders/${orderId}`);
-  return { ok: "Thanks for confirming delivery. You can still report a problem for the next 6 hours." };
+  return { ok: "Delivery confirmed." };
+}
+
+export async function partnerAdminAction(_: FormState, f: FormData): Promise<FormState> {
+  try {
+    await adminUser();
+    if (str(f, "op") === "remove") removeDeliveryPartner(getDb(), Number(str(f, "id")));
+    else addDeliveryPartner(getDb(), str(f, "email"), str(f, "company"));
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath("/admin");
+  return { ok: "Delivery partners updated." };
 }
 
 /* -------------------------------- Payments -------------------------------- */

@@ -14,6 +14,8 @@ import {
 import { payoutProvider } from "@/lib/payments/index.ts";
 import { AdminMarkPaidForm } from "@/components/OrderForms.tsx";
 import AdminButton from "@/components/AdminButton.tsx";
+import { AddPartnerForm, RemovePartnerButton } from "@/components/PartnerForms.tsx";
+import { listDeliveryPartners } from "@/lib/auctions.ts";
 import Countdown from "@/components/Countdown.tsx";
 
 export const dynamic = "force-dynamic";
@@ -38,6 +40,7 @@ export default async function Admin() {
   const payouts = adminPayouts(d);
   const refunds = adminRefunds(d);
   const provider = payoutProvider();
+  const partners = listDeliveryPartners(d);
 
   return (
     <div style={{ display: "grid", gap: 18 }}>
@@ -165,6 +168,27 @@ export default async function Admin() {
               </tbody>
             </table>
           )}
+        </div>
+      </section>
+
+      <section>
+        <h2>Delivery partners</h2>
+        <p className="small muted" style={{ marginTop: -6 }}>
+          Riders sign up for a normal account first, then you add them here. They get a Deliveries page to confirm handovers.
+        </p>
+        <div className="card pad" style={{ display: "grid", gap: 12 }}>
+          {partners.length > 0 && (
+            <div className="table-wrap">
+              <table className="list">
+                <tbody>
+                  {partners.map((p) => (
+                    <tr key={p.id}><td><strong>{p.company}</strong></td><td>{p.name}</td><td className="muted">{p.email}</td><td><RemovePartnerButton id={p.id} /></td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <AddPartnerForm />
         </div>
       </section>
 

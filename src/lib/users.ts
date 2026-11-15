@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 import { AuctionError } from "./auctions.ts";
 
-export type User = { id: number; email: string; name: string };
+export type User = { id: number; email: string; name: string; role?: "member" | "courier"; company?: string | null };
 
 const SESSION_DAYS = 30;
 
@@ -52,7 +52,7 @@ export function userForSession(db: DatabaseSync, token: string | undefined): Use
   if (!token) return null;
   const row = db
     .prepare(
-      `SELECT u.id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id
+      `SELECT u.id, u.email, u.name, u.role, u.company FROM sessions s JOIN users u ON u.id = s.user_id
        WHERE s.token = ? AND s.expires_at > ?`
     )
     .get(token, Date.now()) as User | undefined;

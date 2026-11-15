@@ -3,7 +3,8 @@
 import { ActionForm, Submit } from "./Form.tsx";
 import {
   adminMarkPaidAction,
-  markDeliveredAction,
+  acceptItemAction,
+  adminConfirmDeliveryAction,
   markShippedAction,
   openDisputeAction,
   resolveDisputeAction,
@@ -37,28 +38,47 @@ export function AddressForm({ order }: { order: Order }) {
 }
 
 
-export function ShipForm({ orderId }: { orderId: number }) {
+export function ShipForm({ orderId, partners }: { orderId: number; partners: { id: number; label: string }[] }) {
+  if (partners.length === 0)
+    return <p className="muted" style={{ margin: 0 }}>No delivery partners are set up yet. Bidwell will add them shortly.</p>;
   return (
     <ActionForm action={markShippedAction}>
       <input type="hidden" name="order_id" value={orderId} />
+      <p className="small muted" style={{ margin: 0 }}>
+        Hand the item to a Bidwell delivery partner. They confirm delivery with the winner&apos;s delivery code or signature.
+      </p>
       <div className="two">
-        <label>Carrier / courier<input name="carrier" placeholder="e.g. DHL, local courier" required /></label>
+        <label>
+          Delivery partner
+          <select name="courier_id" defaultValue="" required>
+            <option value="" disabled>Choose one</option>
+            {partners.map((p) => (
+              <option key={p.id} value={p.id}>{p.label}</option>
+            ))}
+          </select>
+        </label>
         <label>Tracking number <span className="hint">Optional</span><input name="tracking" /></label>
       </div>
-      <div><Submit>Mark as shipped</Submit></div>
+      <div><Submit>Hand over for delivery</Submit></div>
     </ActionForm>
   );
 }
 
-export function DeliveredForm({ orderId }: { orderId: number }) {
+export function AcceptForm({ orderId }: { orderId: number }) {
   return (
-    <ActionForm action={markDeliveredAction}>
+    <ActionForm action={acceptItemAction}>
       <input type="hidden" name="order_id" value={orderId} />
-      <p className="small muted" style={{ margin: 0 }}>
-        Only confirm once you have the item and have checked it. You&apos;ll have 6 hours after confirming to report a problem
-        before the seller is paid.
-      </p>
-      <div><Submit>I received the item and it&apos;s as described</Submit></div>
+      <div><Submit>The item is in good condition and as described</Submit></div>
+    </ActionForm>
+  );
+}
+
+export function AdminDeliveryForm({ orderId }: { orderId: number }) {
+  return (
+    <ActionForm action={adminConfirmDeliveryAction} className="row">
+      <input type="hidden" name="order_id" value={orderId} />
+      <input name="note" placeholder="e.g. rider phoned in signed slip #4412" aria-label="How delivery was confirmed" style={{ flex: "1 1 220px", width: "auto" }} required />
+      <Submit className="btn">Confirm delivery</Submit>
     </ActionForm>
   );
 }

@@ -12,6 +12,9 @@ CREATE TABLE IF NOT EXISTS users (
   email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
   name          TEXT NOT NULL,
   password_hash TEXT NOT NULL,
+  -- 'courier' accounts belong to a delivery partner and confirm deliveries.
+  role          TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member','courier')),
+  company       TEXT,
   created_at    INTEGER NOT NULL
 );
 
@@ -74,6 +77,14 @@ CREATE TABLE IF NOT EXISTS orders (
   -- Escrow: Bidwell holds the money from payment until it is released to the seller or refunded.
   escrow_status   TEXT NOT NULL DEFAULT 'none' CHECK (escrow_status IN ('none','held','frozen','released','refunded')),
   shipped_at      INTEGER,
+  -- Delivery: the partner confirms handover with the buyer's code or signature.
+  courier_id      INTEGER REFERENCES users(id),
+  delivery_code   TEXT,
+  delivery_code_attempts INTEGER NOT NULL DEFAULT 0,
+  delivery_method TEXT CHECK (delivery_method IN ('code','signature','admin')),
+  delivery_recipient TEXT,
+  delivery_signature TEXT,
+  accepted_at     INTEGER,
   delivered_at    INTEGER,
   release_at      INTEGER,
   created_at      INTEGER NOT NULL,

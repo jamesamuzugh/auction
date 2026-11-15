@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import crypto from "node:crypto";
 import { tx } from "./db.ts";
 import { formatMoney } from "./money.ts";
 
@@ -70,6 +71,14 @@ export type Order = {
   tracking_number: string | null;
   escrow_status: "none" | "held" | "frozen" | "released" | "refunded";
   shipped_at: number | null;
+  courier_id: number | null;
+  courier_name: string | null;
+  delivery_code: string | null;
+  delivery_code_attempts: number;
+  delivery_method: "code" | "signature" | "admin" | null;
+  delivery_recipient: string | null;
+  delivery_signature: string | null;
+  accepted_at: number | null;
   delivered_at: number | null;
   release_at: number | null;
   created_at: number;
@@ -289,11 +298,12 @@ export function cancelAuction(db: DatabaseSync, auctionId: number, userId: numbe
 
 const ORDER_SELECT = `
   SELECT o.*, a.title AS auction_title, a.image_path, bu.name AS buyer_name, bu.email AS buyer_email,
-         se.name AS seller_name
+         se.name AS seller_name, COALESCE(co.company, co.name) AS courier_name
   FROM orders o
   JOIN auctions a ON a.id = o.auction_id
   JOIN users bu ON bu.id = o.buyer_id
-  JOIN users se ON se.id = o.seller_id`;
+  JOIN users se ON se.id = o.seller_id
+  LEFT JOIN users co ON co.id = o.courier_id`;
 
 export function getOrder(db: DatabaseSync, id: number): Order | undefined {
   return db.prepare(`${ORDER_SELECT} WHERE o.id = ?`).get(id) as Order | undefined;
@@ -392,46 +402,126 @@ export function markPaidOffline(db: DatabaseSync, orderId: number, note: string,
   });
 }
 
+export type DeliveryPartner = { id: number; name: string; company: string | null; email: string };
+
+export function listDeliveryPartners(db: DatabaseSync): DeliveryPartner[] {
+  return db
+    .prepare(`SELECT id, name, company, email FROM users WHERE role = 'courier' ORDER BY COALESCE(company, name)`)
+    .all() as DeliveryPartner[];
+}
+
+/** An admin turns an existing account into a delivery partner account. */
+export function addDeliveryPartner(db: DatabaseSync, email: string, company: string) {
+  if (!company.trim()) throw new AuctionError("Enter the delivery company's name.");
+  const r = db.prepare(`UPDATE users SET role = 'courier', company = ? WHERE email = ?`).run(company.trim(), email.trim().toLowerCase());
+  if (!r.changes) throw new AuctionError("No account uses that email. Ask the rider to sign up first.");
+}
+
+export function removeDeliveryPartner(db: DatabaseSync, userId: number) {
+  const busy = db.prepare(`SELECT 1 FROM orders WHERE courier_id = ? AND status = 'shipped' LIMIT 1`).get(userId);
+  if (busy) throw new AuctionError("This partner still has deliveries in progress.");
+  db.prepare(`UPDATE users SET role = 'member', company = NULL WHERE id = ?`).run(userId);
+}
+
+/**
+ * The seller hands the item to a Bidwell delivery partner. A 6-digit delivery code is created;
+ * only the winner (and admins) can see it, and the partner needs it, or the winner's signature,
+ * to confirm delivery.
+ */
 export function markShipped(
   db: DatabaseSync,
   orderId: number,
   userId: number,
-  carrier: string,
+  courierId: number,
   tracking: string,
   now = Date.now()
 ) {
   const o = requireOrder(db, orderId);
-  if (o.seller_id !== userId) throw new AuctionError("Only the seller can mark the item shipped.");
-  if (o.status !== "paid") throw new AuctionError("Confirm payment before shipping.");
-  if (!carrier.trim()) throw new AuctionError("Enter the shipping carrier or courier.");
+  if (o.seller_id !== userId) throw new AuctionError("Only the seller can hand the item to a delivery partner.");
+  if (o.status !== "paid") throw new AuctionError("Wait for payment before shipping.");
+  const partner = db.prepare(`SELECT id, name, company FROM users WHERE id = ? AND role = 'courier'`).get(courierId) as
+    | { id: number; name: string; company: string | null }
+    | undefined;
+  if (!partner) throw new AuctionError("Choose a delivery partner.");
+  const carrier = partner.company ?? partner.name;
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
   tx(db, () => {
-    db.prepare(`UPDATE orders SET carrier = ?, tracking_number = ?, shipped_at = ? WHERE id = ?`).run(
-      carrier.trim(),
-      tracking.trim() || null,
-      now,
-      orderId
-    );
-    setStatus(
-      db,
-      orderId,
-      "shipped",
-      `Shipped with ${carrier.trim()}${tracking.trim() ? ` (tracking ${tracking.trim()})` : ""}.`,
-      now
-    );
+    db.prepare(
+      `UPDATE orders SET carrier = ?, courier_id = ?, tracking_number = ?, delivery_code = ?, delivery_code_attempts = 0, shipped_at = ? WHERE id = ?`
+    ).run(carrier, partner.id, tracking.trim() || null, code, now, orderId);
+    setStatus(db, orderId, "shipped", `Handed to ${carrier} for delivery${tracking.trim() ? ` (tracking ${tracking.trim()})` : ""}.`, now);
   });
 }
 
 /** How long after delivery is confirmed the buyer can still report a problem before funds go to the seller. */
 export const DISPUTE_WINDOW_MS = Number(process.env.DISPUTE_WINDOW_HOURS ?? 6) * 3_600_000;
 
-export function markDelivered(db: DatabaseSync, orderId: number, userId: number, now = Date.now()) {
+/** Wrong code entries allowed before the partner must take a signature instead. */
+export const MAX_CODE_ATTEMPTS = 5;
+
+export type DeliveryProof =
+  | { method: "code"; code: string; recipientName: string }
+  | { method: "signature"; signature: string; recipientName: string };
+
+/**
+ * The delivery partner confirms they handed the item over, proven by the winner's delivery code
+ * or their signature. This starts the 6-hour window.
+ */
+export function confirmDeliveryByPartner(db: DatabaseSync, orderId: number, courierId: number, proof: DeliveryProof, now = Date.now()) {
   const o = requireOrder(db, orderId);
-  if (o.buyer_id !== userId) throw new AuctionError("Only the winner can confirm delivery.");
-  if (o.status !== "shipped") throw new AuctionError("The item hasn't shipped yet.");
-  tx(db, () => confirmDelivery(db, o, now, "Winner confirmed the item arrived."));
+  if (o.courier_id !== courierId) throw new AuctionError("This delivery isn't assigned to you.");
+  if (o.status !== "shipped") throw new AuctionError("This order isn't out for delivery.");
+  if (!proof.recipientName.trim()) throw new AuctionError("Enter the name of the person who received it.");
+  if (proof.method === "code") {
+    if (o.delivery_code_attempts >= MAX_CODE_ATTEMPTS)
+      throw new AuctionError("Too many wrong codes. Take the recipient's signature instead.");
+    const given = proof.code.replace(/\D/g, "");
+    const ok = given.length === 6 && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(o.delivery_code ?? "------"));
+    if (!ok) {
+      db.prepare(`UPDATE orders SET delivery_code_attempts = delivery_code_attempts + 1 WHERE id = ?`).run(o.id);
+      const left = MAX_CODE_ATTEMPTS - o.delivery_code_attempts - 1;
+      throw new AuctionError(
+        left > 0 ? `That code doesn't match. ${left} ${left === 1 ? "try" : "tries"} left.` : "Too many wrong codes. Take the recipient's signature instead."
+      );
+    }
+  } else {
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/=]{200,}$/.test(proof.signature) || proof.signature.length > 400_000)
+      throw new AuctionError("Ask the recipient to sign in the box.");
+  }
+  tx(db, () => {
+    db.prepare(`UPDATE orders SET delivery_method = ?, delivery_recipient = ?, delivery_signature = ? WHERE id = ?`).run(
+      proof.method,
+      proof.recipientName.trim(),
+      proof.method === "signature" ? proof.signature : null,
+      o.id
+    );
+    confirmDelivery(
+      db,
+      o,
+      now,
+      `${o.carrier} delivered it to ${proof.recipientName.trim()}, confirmed by ${proof.method === "code" ? "the winner's delivery code" : "signature"}.`
+    );
+  });
 }
 
-/** Starts the dispute window. Used by the buyer's confirmation and by auto-confirmation. */
+/** Admin override when a partner can't confirm in the app (e.g. phone died). The caller checks admin rights. */
+export function adminConfirmDelivery(db: DatabaseSync, orderId: number, note: string, now = Date.now()) {
+  const o = requireOrder(db, orderId);
+  if (o.status !== "shipped") throw new AuctionError("This order isn't out for delivery.");
+  if (!note.trim()) throw new AuctionError("Say how the delivery was confirmed.");
+  tx(db, () => {
+    db.prepare(`UPDATE orders SET delivery_method = 'admin', delivery_recipient = ? WHERE id = ?`).run(note.trim(), o.id);
+    confirmDelivery(db, o, now, `Bidwell confirmed delivery: ${note.trim()}.`);
+  });
+}
+
+export function deliveriesForPartner(db: DatabaseSync, courierId: number): Order[] {
+  return db
+    .prepare(`${ORDER_SELECT} WHERE o.courier_id = ? ORDER BY o.status = 'shipped' DESC, o.shipped_at DESC LIMIT 200`)
+    .all(courierId) as Order[];
+}
+
+/** Starts the dispute window once delivery is confirmed. */
 export function confirmDelivery(db: DatabaseSync, o: Order, now: number, why: string) {
   const releaseAt = now + DISPUTE_WINDOW_MS;
   db.prepare(`UPDATE orders SET delivered_at = ?, release_at = ? WHERE id = ?`).run(now, releaseAt, o.id);
