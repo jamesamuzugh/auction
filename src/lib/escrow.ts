@@ -16,9 +16,9 @@ import type { PaymentProvider } from "./payments/types.ts";
 
 const HOUR = 3_600_000;
 
-/** Bidwell's cut of each sale, in percent. */
+/** Bidwell's cut, in percent of the total the winner pays (winning bid + delivery). */
 export function feePercent(): number {
-  const n = Number(process.env.PLATFORM_FEE_PERCENT ?? 0);
+  const n = Number(process.env.PLATFORM_FEE_PERCENT ?? 5);
   return Number.isFinite(n) && n >= 0 && n < 100 ? n : 0;
 }
 
@@ -55,6 +55,7 @@ export type Payout = {
   seller_id: number;
   gross_cents: number;
   fee_cents: number;
+  delivery_fee_cents: number;
   amount_cents: number;
   currency: string;
   status: "waiting_details" | "pending" | "processing" | "paid" | "failed";
@@ -113,7 +114,7 @@ export function acceptItem(db: DatabaseSync, orderId: number, userId: number, no
 }
 
 export function canDispute(o: Order, now = Date.now()): boolean {
-  if (o.status === "paid" || o.status === "shipped") return true;
+  if (o.status === "paid" || o.status === "shipped" || o.status === "returning") return true;
   return o.status === "delivered" && o.release_at != null && now < o.release_at;
 }
 
@@ -223,30 +224,49 @@ export function disputesForOrder(db: DatabaseSync, orderId: number): Dispute[] {
 
 /* --------------------------- Releasing and refunding --------------------------- */
 
+/** How the winner's payment splits when the sale completes. */
+export function saleSplit(o: Pick<Order, "total_cents" | "delivery_fee_cents">) {
+  const fee = feeFor(o.total_cents);
+  return { total: o.total_cents, fee, delivery: o.delivery_fee_cents, seller: o.total_cents - fee - o.delivery_fee_cents };
+}
+
+/** How much the winner gets back after a failed delivery: the total less the fee and delivery both ways. */
+export function failedDeliverySplit(o: Pick<Order, "total_cents" | "delivery_fee_cents" | "return_fee_cents">) {
+  const fee = feeFor(o.total_cents);
+  const refund = Math.max(0, o.total_cents - fee - o.delivery_fee_cents - o.return_fee_cents);
+  return { total: o.total_cents, fee, delivery: o.delivery_fee_cents, returnFee: o.return_fee_cents, refund };
+}
+
 function release(db: DatabaseSync, o: Order, now: number, why: string) {
-  const fee = feeFor(o.amount_cents);
+  const split = saleSplit(o);
   const acct = getPayoutAccount(db, o.seller_id);
   db.prepare(`UPDATE orders SET escrow_status = 'released' WHERE id = ?`).run(o.id);
   db.prepare(
-    `INSERT OR IGNORE INTO payouts (order_id, seller_id, gross_cents, fee_cents, amount_cents, currency, status, reference, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT OR IGNORE INTO payouts (order_id, seller_id, gross_cents, fee_cents, delivery_fee_cents, amount_cents, currency, status, reference, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     o.id,
     o.seller_id,
-    o.amount_cents,
-    fee,
-    o.amount_cents - fee,
+    split.total,
+    split.fee,
+    split.delivery,
+    split.seller,
     currencyOf(db, o),
     acct ? "pending" : "waiting_details",
     `payout-ord${o.id}-${crypto.randomBytes(4).toString("hex")}`,
     now,
     now
   );
-  const feeText = fee ? ` (${formatMoney(o.amount_cents)} less ${formatMoney(fee)} Bidwell fee)` : "";
-  setStatus(db, o.id, "completed", `${why} ${formatMoney(o.amount_cents - fee)} released to the seller${feeText}.`, now);
+  setStatus(
+    db,
+    o.id,
+    "completed",
+    `${why} ${formatMoney(split.seller)} released to the seller (${formatMoney(split.total)} paid, less ${formatMoney(split.fee)} Bidwell fee and ${formatMoney(split.delivery)} delivery).`,
+    now
+  );
 }
 
-function startRefund(db: DatabaseSync, o: Order, now: number, why: string) {
+function startRefund(db: DatabaseSync, o: Order, now: number, why: string, amountCents = o.total_cents) {
   const p = db
     .prepare(`SELECT reference, provider FROM payments WHERE order_id = ? AND status = 'success' ORDER BY id DESC LIMIT 1`)
     .get(o.id) as { reference: string; provider: string } | undefined;
@@ -254,13 +274,29 @@ function startRefund(db: DatabaseSync, o: Order, now: number, why: string) {
   db.prepare(
     `INSERT OR IGNORE INTO refunds (order_id, payment_reference, provider, amount_cents, currency, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(o.id, p?.reference ?? null, p?.provider ?? null, o.amount_cents, currencyOf(db, o), p ? "pending" : "manual", now, now);
+  ).run(o.id, p?.reference ?? null, p?.provider ?? null, amountCents, currencyOf(db, o), p ? "pending" : "manual", now, now);
   setStatus(
     db,
     o.id,
     "refunded",
-    `${why} ${formatMoney(o.amount_cents)} is being refunded to the winner${p ? "" : " (paid offline, so Bidwell refunds it by hand)"}.`,
+    `${why} ${formatMoney(amountCents)} is being refunded to the winner${p ? "" : " (paid offline, so Bidwell refunds it by hand)"}.`,
     now
+  );
+}
+
+/** After a failed delivery the item is back with the seller: refund the winner what's left. */
+export function settleReturnedOrder(db: DatabaseSync, orderId: number, now = Date.now()) {
+  const o = requireOrder(db, orderId);
+  if (o.status !== "returned" || o.escrow_status !== "held") return;
+  const s = failedDeliverySplit(o);
+  tx(db, () =>
+    startRefund(
+      db,
+      o,
+      now,
+      `Delivery failed 3 times. From the ${formatMoney(s.total)} paid, Bidwell keeps the ${formatMoney(s.fee)} fee and ${formatMoney(s.delivery + s.returnFee)} for delivery and return.`,
+      s.refund
+    )
   );
 }
 
@@ -286,6 +322,9 @@ export function runEscrowTimers(db: DatabaseSync, now = Date.now()): { released:
         release(db, o, now, "No problem was reported within 6 hours of delivery.");
     });
   }
+  // Items handed back to the seller after failed deliveries: refund the winner what's left.
+  const returned = db.prepare(`SELECT id FROM orders WHERE status = 'returned' AND escrow_status = 'held'`).all() as { id: number }[];
+  for (const { id } of returned) settleReturnedOrder(db, id, now);
   return { released: due.length };
 }
 
@@ -334,7 +373,7 @@ export function payoutsForSeller(db: DatabaseSync, userId: number) {
 export function heldForSeller(db: DatabaseSync, userId: number) {
   return db
     .prepare(
-      `SELECT o.id, o.amount_cents, o.status, o.release_at, a.title AS auction_title FROM orders o JOIN auctions a ON a.id = o.auction_id
+      `SELECT o.id, (o.total_cents - o.delivery_fee_cents) AS amount_cents, o.status, o.release_at, a.title AS auction_title FROM orders o JOIN auctions a ON a.id = o.auction_id
        WHERE o.seller_id = ? AND o.escrow_status IN ('held', 'frozen') ORDER BY o.id DESC`
     )
     .all(userId) as { id: number; amount_cents: number; status: OrderStatus; release_at: number | null; auction_title: string }[];
@@ -485,18 +524,24 @@ export function isAdminEmail(email: string): boolean {
     .includes(email.toLowerCase());
 }
 
+function returnedFees(db: DatabaseSync): number {
+  const rows = db.prepare(`SELECT total_cents FROM orders WHERE returned_at IS NOT NULL AND status = 'refunded'`).all() as { total_cents: number }[];
+  return rows.reduce((s, r) => s + feeFor(r.total_cents), 0);
+}
+
 export function adminOverview(db: DatabaseSync) {
   const sum = (sql: string) => (db.prepare(sql).get() as { n: number | null }).n ?? 0;
   return {
-    heldCents: sum(`SELECT SUM(amount_cents) AS n FROM orders WHERE escrow_status = 'held'`),
-    frozenCents: sum(`SELECT SUM(amount_cents) AS n FROM orders WHERE escrow_status = 'frozen'`),
+    heldCents: sum(`SELECT SUM(total_cents) AS n FROM orders WHERE escrow_status = 'held'`),
+    frozenCents: sum(`SELECT SUM(total_cents) AS n FROM orders WHERE escrow_status = 'frozen'`),
+    deliveryCents: sum(`SELECT SUM(delivery_fee_cents + CASE WHEN returned_at IS NOT NULL THEN return_fee_cents ELSE 0 END) AS n FROM orders WHERE status IN ('completed','refunded') AND (escrow_status = 'released' OR returned_at IS NOT NULL)`),
     owedCents: sum(`SELECT SUM(amount_cents) AS n FROM payouts WHERE status IN ('waiting_details','pending','processing','failed')`),
-    feesCents: sum(`SELECT SUM(fee_cents) AS n FROM payouts`),
+    feesCents: sum(`SELECT SUM(fee_cents) AS n FROM payouts`) + returnedFees(db),
     openDisputes: sum(`SELECT COUNT(*) AS n FROM disputes WHERE status = 'open'`),
   };
 }
 
-const ORDER_COLS = `o.id, o.amount_cents, o.status, o.escrow_status, o.release_at, a.title AS auction_title,
+const ORDER_COLS = `o.id, o.total_cents AS amount_cents, o.status, o.escrow_status, o.release_at, a.title AS auction_title,
   bu.name AS buyer_name, se.name AS seller_name`;
 const ORDER_JOIN = `JOIN orders o ON o.id = x.order_id JOIN auctions a ON a.id = o.auction_id
   JOIN users bu ON bu.id = o.buyer_id JOIN users se ON se.id = o.seller_id`;
@@ -513,7 +558,7 @@ export function adminDisputes(db: DatabaseSync, which: "open" | "closed") {
 export function adminHeldOrders(db: DatabaseSync) {
   return db
     .prepare(
-      `SELECT o.id, o.amount_cents, o.status, o.escrow_status, o.release_at, a.title AS auction_title, bu.name AS buyer_name, se.name AS seller_name
+      `SELECT o.id, o.total_cents AS amount_cents, o.status, o.escrow_status, o.release_at, a.title AS auction_title, bu.name AS buyer_name, se.name AS seller_name
        FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN users bu ON bu.id = o.buyer_id JOIN users se ON se.id = o.seller_id
        WHERE o.escrow_status IN ('held','frozen') ORDER BY COALESCE(o.release_at, 9e15) ASC`
     )
@@ -523,7 +568,7 @@ export function adminHeldOrders(db: DatabaseSync) {
 export function adminAwaitingPayment(db: DatabaseSync) {
   return db
     .prepare(
-      `SELECT o.id, o.amount_cents, a.title AS auction_title, bu.name AS buyer_name, bu.email AS buyer_email
+      `SELECT o.id, o.total_cents AS amount_cents, a.title AS auction_title, bu.name AS buyer_name, bu.email AS buyer_email
        FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN users bu ON bu.id = o.buyer_id
        WHERE o.status = 'awaiting_payment' ORDER BY o.id`
     )

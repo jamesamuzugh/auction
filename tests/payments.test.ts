@@ -18,6 +18,7 @@ import {
 import { paystack } from "../src/lib/payments/paystack.ts";
 
 const HOUR = 3_600_000;
+process.env.DELIVERY_FEE = "0"; // keep payment amounts equal to the bid in these tests
 
 function wonOrder() {
   const db = getDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "auction-pay-")), "t.db"));

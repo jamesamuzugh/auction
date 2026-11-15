@@ -1,14 +1,16 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { db, moveMoney, requireUser } from "@/lib/server.ts";
-import { getOrder, listDeliveryPartners, orderEvents } from "@/lib/auctions.ts";
+import { deliveryAttempts, getOrder, listDeliveryPartners, MAX_DELIVERY_ATTEMPTS, orderEvents } from "@/lib/auctions.ts";
 import { formatMoney, CURRENCY } from "@/lib/money.ts";
 import { ORDER_LABEL, ORDER_STEPS, dateTime } from "@/lib/format.ts";
 import {
   DISPUTE_REASONS,
   canDispute,
   disputesForOrder,
-  feeFor,
+  failedDeliverySplit,
+  feePercent,
+  saleSplit,
   getPayoutAccount,
   getPayoutForOrder,
   getRefundForOrder,
@@ -68,7 +70,9 @@ export default async function OrderPage({
   const openDispute = disputes.find((x) => x.status === "open");
   const payout = getPayoutForOrder(d, o.id);
   const refund = getRefundForOrder(d, o.id);
-  const fee = payout?.fee_cents ?? feeFor(o.amount_cents);
+  const split = saleSplit(o);
+  const failSplit = failedDeliverySplit(o);
+  const attempts = deliveryAttempts(d, o.id);
   const flow = o.status === "completed" ? 5 : ORDER_STEPS.findIndex((s) => s.key === o.status);
   const stepIdx = o.status === "disputed" && openDispute ? ORDER_STEPS.findIndex((s) => s.key === openDispute.prev_status) : flow;
   const releaseWindowOpen = o.status === "delivered" && o.release_at != null;
@@ -107,7 +111,7 @@ export default async function OrderPage({
       {/* Escrow explainer for whichever side is looking */}
       {["held", "frozen"].includes(o.escrow_status) && (
         <div className="card pad escrow">
-          <strong>{formatMoney(o.amount_cents)} is held by Bidwell</strong>
+          <strong>{formatMoney(o.total_cents)} is held by Bidwell</strong>
           {o.escrow_status === "frozen" ? (
             <p>Payment is frozen while Bidwell reviews the reported problem. Nobody can move it until a decision is made.</p>
           ) : releaseWindowOpen ? (
@@ -122,8 +126,8 @@ export default async function OrderPage({
             </p>
           ) : (
             <p>
-              You&apos;ll be paid {formatMoney(o.amount_cents - fee)}
-              {fee > 0 && <> (after the {formatMoney(fee)} Bidwell fee)</>} once the delivery partner confirms delivery and the winner
+              You&apos;ll be paid {formatMoney(split.seller)} (after the {formatMoney(split.fee)} Bidwell fee and{" "}
+              {formatMoney(split.delivery)} delivery) once the delivery partner confirms delivery and the winner
               accepts the item, or 6 hours after delivery if they don&apos;t report a problem.
             </p>
           )}
@@ -139,7 +143,11 @@ export default async function OrderPage({
       )}
       {isBuyer && o.status === "awaiting_payment" && (
         <div className="card pad">
-          <h2 style={{ marginTop: 0 }}>Next: pay {formatMoney(o.amount_cents)}</h2>
+          <h2 style={{ marginTop: 0 }}>Next: pay {formatMoney(o.total_cents)}</h2>
+          <p className="small muted" style={{ marginTop: 0 }}>
+            {formatMoney(o.amount_cents)} winning bid + {formatMoney(o.delivery_fee_cents)} delivery. You pay Bidwell, and we hold it until
+            you have your item.
+          </p>
           {providers.length > 0 ? (
             <PayForm orderId={o.id} providers={providers} />
           ) : (
@@ -210,6 +218,54 @@ export default async function OrderPage({
         </div>
       )}
 
+      {o.status === "returning" && (
+        <div className="card pad dispute open">
+          <h2 style={{ margin: 0 }}>Delivery failed {MAX_DELIVERY_ATTEMPTS} times</h2>
+          {isBuyer && (
+            <p>
+              The item is going back to the seller at your cost. Once it&apos;s returned you&apos;ll be refunded{" "}
+              <strong>{formatMoney(failSplit.refund)}</strong>: the {formatMoney(failSplit.total)} you paid, less the{" "}
+              {formatMoney(failSplit.fee)} Bidwell fee, {formatMoney(failSplit.delivery)} delivery and {formatMoney(failSplit.returnFee)} return.
+              If the partner never actually came, report a problem below.
+            </p>
+          )}
+          {(isSeller || me.isAdmin) && (
+            <>
+              <p>{o.carrier} is bringing the item back. Give them this return code only when you have it in your hands:</p>
+              <div className="delivery-code">{o.return_code}</div>
+            </>
+          )}
+        </div>
+      )}
+
+      {attempts.length > 0 && (
+        <div className="card pad" style={{ display: "grid", gap: 12 }}>
+          <h2 style={{ margin: 0 }}>Failed delivery attempts ({attempts.length} of {MAX_DELIVERY_ATTEMPTS})</h2>
+          {attempts.map((t) => (
+            <div key={t.id} className="attempt">
+              <a href={`/api/proofs/${t.photo_path}`} target="_blank" rel="noreferrer">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={`/api/proofs/${t.photo_path}`} alt={`Photo from attempt ${t.attempt_no}`} />
+              </a>
+              <div style={{ display: "grid", gap: 2, minWidth: 0 }}>
+                <strong>Attempt {t.attempt_no} · {dateTime(t.created_at)}</strong>
+                <span>{t.note}</span>
+                <span className="small muted">
+                  {t.lat != null && t.lng != null ? (
+                    <a href={`https://www.google.com/maps?q=${t.lat},${t.lng}`} target="_blank" rel="noreferrer">
+                      Location {t.lat.toFixed(5)}, {t.lng.toFixed(5)}
+                    </a>
+                  ) : (
+                    "No location shared by the phone"
+                  )}
+                  {t.accuracy_m != null && <> (within {Math.round(t.accuracy_m)} m)</>}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Disputes */}
       {disputes.map((x) => (
         <div key={x.id} className={`card pad dispute ${x.status === "open" ? "open" : ""}`}>
@@ -276,6 +332,32 @@ export default async function OrderPage({
           )}
         </div>
       )}
+
+      <div className="card pad">
+        <h2 style={{ marginTop: 0 }}>Payment breakdown</h2>
+        <table className="list">
+          <tbody>
+            <tr><td>Winning bid</td><td className="num">{formatMoney(o.amount_cents)}</td></tr>
+            <tr><td>Delivery</td><td className="num">{formatMoney(o.delivery_fee_cents)}</td></tr>
+            <tr><th>Total paid by the winner</th><th className="num">{formatMoney(o.total_cents)}</th></tr>
+            {(isSeller || me.isAdmin) && !["returning", "returned", "refunded"].includes(o.status) && (
+              <>
+                <tr><td>Bidwell fee ({feePercent()}% of the total)</td><td className="num">−{formatMoney(split.fee)}</td></tr>
+                <tr><td>Delivery, paid to the partner</td><td className="num">−{formatMoney(split.delivery)}</td></tr>
+                <tr><th>Seller receives</th><th className="num">{formatMoney(split.seller)}</th></tr>
+              </>
+            )}
+            {["returning", "returned"].includes(o.status) || (o.status === "refunded" && o.returned_at) ? (
+              <>
+                <tr><td>Bidwell fee ({feePercent()}% of the total)</td><td className="num">−{formatMoney(failSplit.fee)}</td></tr>
+                <tr><td>Delivery</td><td className="num">−{formatMoney(failSplit.delivery)}</td></tr>
+                <tr><td>Return to seller</td><td className="num">−{formatMoney(failSplit.returnFee)}</td></tr>
+                <tr><th>Refunded to the winner</th><th className="num">{formatMoney(failSplit.refund)}</th></tr>
+              </>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
 
       {o.ship_line1 && (isBuyer || isSeller || me.isAdmin) && (
         <div className="card pad">

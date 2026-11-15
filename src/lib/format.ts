@@ -35,6 +35,8 @@ export const ORDER_LABEL: Record<string, string> = {
   paid: "Paid, preparing to ship",
   shipped: "Shipped",
   delivered: "Delivered, in the 6-hour check period",
+  returning: "Delivery failed, returning to seller",
+  returned: "Returned to seller",
   disputed: "Problem reported, under review",
   completed: "Complete, seller paid",
   refunded: "Refunded to the winner",

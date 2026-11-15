@@ -2,20 +2,29 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ActionForm, Submit } from "./Form.tsx";
-import { partnerDeliverAction } from "@/app/actions.ts";
+import { failedAttemptAction, partnerDeliverAction, returnToSellerAction } from "@/app/actions.ts";
 
 /** What a delivery partner fills in at the door: the winner's code, or their signature. */
-export default function DeliverForm({ orderId, codeLocked }: { orderId: number; codeLocked: boolean }) {
+export default function DeliverForm({
+  orderId,
+  codeLocked,
+  mode = "deliver",
+}: {
+  orderId: number;
+  codeLocked: boolean;
+  mode?: "deliver" | "return";
+}) {
+  const who = mode === "deliver" ? "Winner" : "Seller";
   const [method, setMethod] = useState<"code" | "signature">(codeLocked ? "signature" : "code");
   const [signature, setSignature] = useState("");
   return (
-    <ActionForm action={partnerDeliverAction}>
+    <ActionForm action={mode === "deliver" ? partnerDeliverAction : returnToSellerAction}>
       <input type="hidden" name="order_id" value={orderId} />
       <input type="hidden" name="method" value={method} />
       <fieldset className="choices">
         <legend>Proof of delivery</legend>
         <label className="choice">
-          <input type="radio" checked={method === "code"} disabled={codeLocked} onChange={() => setMethod("code")} /> Winner&apos;s 6-digit delivery code
+          <input type="radio" checked={method === "code"} disabled={codeLocked} onChange={() => setMethod("code")} /> {who}&apos;s 6-digit {mode === "deliver" ? "delivery" : "return"} code
         </label>
         <label className="choice">
           <input type="radio" checked={method === "signature"} onChange={() => setMethod("signature")} /> Recipient&apos;s signature
@@ -28,7 +37,7 @@ export default function DeliverForm({ orderId, codeLocked }: { orderId: number; 
       </label>
       {method === "code" ? (
         <label>
-          Delivery code
+          {mode === "deliver" ? "Delivery code" : "Return code"}
           <input name="code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} pattern="[0-9]{6}" placeholder="••••••" required className="code-input" />
         </label>
       ) : (
@@ -37,7 +46,46 @@ export default function DeliverForm({ orderId, codeLocked }: { orderId: number; 
           <input type="hidden" name="signature" value={signature} />
         </>
       )}
-      <div><Submit>Confirm delivery</Submit></div>
+      <div><Submit>{mode === "deliver" ? "Confirm delivery" : "Confirm returned to seller"}</Submit></div>
+    </ActionForm>
+  );
+}
+
+/** Proof that the partner went to the address and couldn't deliver: photo, location, note. */
+export function FailedAttemptForm({ orderId, attempt }: { orderId: number; attempt: number }) {
+  const [loc, setLoc] = useState<{ lat: number; lng: number; acc: number } | null>(null);
+  const [locMsg, setLocMsg] = useState("Getting your location…");
+  useEffect(() => {
+    if (!("geolocation" in navigator)) return setLocMsg("This phone can't share its location.");
+    navigator.geolocation.getCurrentPosition(
+      (p) => {
+        setLoc({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy });
+        setLocMsg(`Location captured (within ${Math.round(p.coords.accuracy)} m).`);
+      },
+      () => setLocMsg("Location wasn't shared. Allow location access so the visit can be verified."),
+      { enableHighAccuracy: true, timeout: 15000 }
+    );
+  }, []);
+  return (
+    <ActionForm action={failedAttemptAction}>
+      <input type="hidden" name="order_id" value={orderId} />
+      <input type="hidden" name="lat" value={loc?.lat ?? ""} />
+      <input type="hidden" name="lng" value={loc?.lng ?? ""} />
+      <input type="hidden" name="accuracy" value={loc?.acc ?? ""} />
+      <p className="small muted" style={{ margin: 0 }}>
+        Attempt {attempt} of 3. Take a photo showing you&apos;re at the address (gate, door or house number). After 3 failed attempts
+        the item goes back to the seller at the winner&apos;s cost.
+      </p>
+      <label>
+        Photo at the address
+        <input name="photo" type="file" accept="image/*" capture="environment" required />
+      </label>
+      <label>
+        What happened?
+        <input name="note" placeholder="e.g. Nobody home, called twice, no answer" required minLength={5} />
+      </label>
+      <div className={`small ${loc ? "" : "muted"}`}>{locMsg}</div>
+      <div><Submit className="btn danger">Record failed attempt</Submit></div>
     </ActionForm>
   );
 }

@@ -22,6 +22,8 @@ import {
   addDeliveryPartner,
   adminConfirmDelivery,
   confirmDeliveryByPartner,
+  confirmReturnToSeller,
+  recordFailedAttempt,
   removeDeliveryPartner,
   markPaidOffline,
   markShipped,
@@ -30,9 +32,11 @@ import {
   setShippingAddress,
 } from "@/lib/auctions.ts";
 import { getProvider } from "@/lib/payments/index.ts";
+import { saveProofPhoto } from "@/lib/proofs.ts";
 import {
   DISPUTE_REASONS,
   acceptItem,
+  settleReturnedOrder,
   markRefundDoneManually,
   openDispute,
   resolveDispute,
@@ -247,6 +251,53 @@ export async function partnerDeliverAction(_: FormState, f: FormData): Promise<F
   }
   revalidatePath("/deliveries");
   return { ok: `Order #${orderId} marked as delivered.` };
+}
+
+/** The partner couldn't deliver: photo at the address, phone location and a note. */
+export async function failedAttemptAction(_: FormState, f: FormData): Promise<FormState> {
+  const user = await currentUser();
+  if (!user) redirect("/login?next=/deliveries");
+  const orderId = Number(str(f, "order_id"));
+  let n: number;
+  try {
+    if (user.role !== "courier") throw new AuctionError("Only delivery partners can record attempts.");
+    const num = (k: string) => (str(f, k) === "" ? null : Number(str(f, k)));
+    const photoPath = await saveProofPhoto(f.get("photo"));
+    n = recordFailedAttempt(db(), orderId, user.id, {
+      note: str(f, "note"),
+      photoPath,
+      lat: num("lat"),
+      lng: num("lng"),
+      accuracyM: num("accuracy"),
+    });
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath("/deliveries");
+  return { ok: n >= 3 ? "Third failed attempt recorded. Take the item back to the seller." : `Attempt ${n} of 3 recorded.` };
+}
+
+/** The partner hands an undeliverable item back to the seller. */
+export async function returnToSellerAction(_: FormState, f: FormData): Promise<FormState> {
+  const user = await currentUser();
+  if (!user) redirect("/login?next=/deliveries");
+  const orderId = Number(str(f, "order_id"));
+  try {
+    if (user.role !== "courier") throw new AuctionError("Only delivery partners can confirm returns.");
+    const recipientName = str(f, "recipient");
+    const d = db();
+    if (str(f, "method") === "signature") {
+      confirmReturnToSeller(d, orderId, user.id, { method: "signature", signature: str(f, "signature"), recipientName });
+    } else {
+      confirmReturnToSeller(d, orderId, user.id, { method: "code", code: str(f, "code"), recipientName });
+    }
+    settleReturnedOrder(d, orderId);
+  } catch (e) {
+    return fail(e);
+  }
+  await moveMoney();
+  revalidatePath("/deliveries");
+  return { ok: `Order #${orderId} returned to the seller.` };
 }
 
 export async function adminConfirmDeliveryAction(_: FormState, f: FormData): Promise<FormState> {

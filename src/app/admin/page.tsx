@@ -53,6 +53,7 @@ export default async function Admin() {
         <div className="card"><span className="small muted">Frozen by reports</span><span className="v">{formatMoney(ov.frozenCents)}</span></div>
         <div className="card"><span className="small muted">Owed to sellers</span><span className="v">{formatMoney(ov.owedCents)}</span></div>
         <div className="card"><span className="small muted">Fees earned ({feePercent()}%)</span><span className="v">{formatMoney(ov.feesCents)}</span></div>
+        <div className="card"><span className="small muted">Delivery fees due to partners</span><span className="v">{formatMoney(ov.deliveryCents)}</span></div>
       </div>
       {!provider && <div className="msg err">No payout provider is connected, so released funds queue up until Paystack keys are set.</div>}
 
@@ -127,7 +128,7 @@ export default async function Admin() {
         <div className="card table-wrap">
           {payouts.length === 0 ? <div className="empty-state">No payouts yet.</div> : (
             <table className="list">
-              <thead><tr><th>Seller</th><th>Order</th><th>Sale</th><th>Fee</th><th>Payout</th><th>Status</th><th></th></tr></thead>
+              <thead><tr><th>Seller</th><th>Order</th><th>Paid</th><th>Fee</th><th>Delivery</th><th>Payout</th><th>Status</th><th></th></tr></thead>
               <tbody>
                 {payouts.map((p) => (
                   <tr key={p.id}>
@@ -135,6 +136,7 @@ export default async function Admin() {
                     <td><Link href={`/orders/${p.order_id}`}>{p.auction_title}</Link></td>
                     <td>{formatMoney(p.gross_cents)}</td>
                     <td>{formatMoney(p.fee_cents)}</td>
+                    <td>{formatMoney(p.delivery_fee_cents)}</td>
                     <td><strong>{formatMoney(p.amount_cents)}</strong></td>
                     <td><span className={`pill ${PILL[p.status]}`}>{WORD[p.status]}</span>{p.failure_reason && <div className="small muted">{p.failure_reason}</div>}</td>
                     <td>{p.status === "failed" && <AdminButton op="retry_payout" id={p.id}>Retry</AdminButton>}</td>

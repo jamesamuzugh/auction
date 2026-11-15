@@ -10,13 +10,15 @@ confirms delivery and **6 hours pass without a reported problem**.
 
 | Step | Money |
 | --- | --- |
-| Winner pays | Held by Bidwell (`escrow_status = held`) |
+| Winner pays the winning bid plus the delivery fee | Held by Bidwell (`escrow_status = held`) |
 | Seller hands the item to a Bidwell delivery partner | Still held; the winner gets a 6-digit delivery code |
 | Delivery partner confirms handover with the winner's code or signature | Still held; 6-hour window starts |
-| Winner accepts the item as in good condition | Released at once to the seller, less `PLATFORM_FEE_PERCENT` |
+| Winner accepts the item as in good condition | Released at once to the seller: total less the 5% fee (`PLATFORM_FEE_PERCENT`, of the buyer's total) and the delivery fee |
 | 6 hours pass with no acceptance and no report | Released to the seller |
 | Winner reports a problem (any time after paying, until the window ends) | Frozen until an admin decides |
-| Admin decides | Refund the winner, pay the seller, or let the order continue |
+| Admin decides | Refund the winner (in full), pay the seller, or let the order continue |
+| Partner fails to deliver 3 times (photo + GPS + note each time) | Item goes back to the seller, who gives the partner a return code |
+| Partner confirms the return | Winner refunded the total less the 5% fee, the delivery fee and the return fee |
 
 - Payouts go to the seller's bank account or mobile money wallet via Paystack Transfers;
   refunds go back through Paystack Refunds. Both are queued, claimed before sending (so they
@@ -24,6 +26,9 @@ confirms delivery and **6 hours pass without a reported problem**.
 - Delivery partners are ordinary accounts an admin promotes on `/admin`. Their `/deliveries`
   page lists parcels with the address and a form to confirm with the code (5 wrong tries, then
   signature only) or a signature drawn on screen. Admins can confirm by hand as a fallback.
+- A failed attempt needs a photo taken at the address, the phone's GPS location and a note.
+  Photos are stored privately (`PROOF_DIR`, default `data/proofs`) and shown only to the buyer,
+  seller, partner and admins.
 - `/admin` (emails in `ADMIN_EMAILS`) shows held and frozen money, open reports, payouts,
   refunds, and lets an admin record an offline payment made into Bidwell's own account.
 - Releases happen on page loads and from `GET /api/cron/escrow` (send

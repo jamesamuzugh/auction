@@ -160,3 +160,6 @@ form.inline { display: inline; }
   header.site .container { height: auto; padding-block: 10px; flex-wrap: wrap; row-gap: 6px; }
   nav.main { margin-left: 0; gap: 12px; }
 }
+.attempt { display: grid; grid-template-columns: 96px 1fr; gap: 12px; align-items: start; }
+.attempt img { width: 96px; height: 96px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
+.dispute.open > p { margin: 0; }

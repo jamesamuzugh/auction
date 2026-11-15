@@ -63,7 +63,14 @@ CREATE TABLE IF NOT EXISTS orders (
   amount_cents    INTEGER NOT NULL,
   status          TEXT NOT NULL DEFAULT 'awaiting_address'
                   CHECK (status IN ('awaiting_address','awaiting_payment','paid','shipped','delivered',
-                                    'disputed','completed','refunded','cancelled')),
+                                    'returning','returned','disputed','completed','refunded','cancelled')),
+  -- What the winner pays: the winning bid plus delivery.
+  delivery_fee_cents INTEGER NOT NULL DEFAULT 0,
+  total_cents     INTEGER NOT NULL DEFAULT 0,
+  -- Failed delivery: after 3 attempts the item goes back to the seller at the winner's cost.
+  return_fee_cents INTEGER NOT NULL DEFAULT 0,
+  return_code     TEXT,
+  returned_at     INTEGER,
   ship_name       TEXT,
   ship_phone      TEXT,
   ship_line1      TEXT,
@@ -138,6 +145,7 @@ CREATE TABLE IF NOT EXISTS payouts (
   seller_id      INTEGER NOT NULL REFERENCES users(id),
   gross_cents    INTEGER NOT NULL,
   fee_cents      INTEGER NOT NULL,
+  delivery_fee_cents INTEGER NOT NULL DEFAULT 0,
   amount_cents   INTEGER NOT NULL,
   currency       TEXT NOT NULL,
   status         TEXT NOT NULL CHECK (status IN ('waiting_details','pending','processing','paid','failed')),
@@ -162,6 +170,20 @@ CREATE TABLE IF NOT EXISTS refunds (
   failure_reason    TEXT,
   created_at        INTEGER NOT NULL,
   updated_at        INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS delivery_attempts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id   INTEGER NOT NULL REFERENCES orders(id),
+  courier_id INTEGER NOT NULL REFERENCES users(id),
+  attempt_no INTEGER NOT NULL,
+  note       TEXT NOT NULL,
+  photo_path TEXT NOT NULL,
+  lat        REAL,
+  lng        REAL,
+  accuracy_m REAL,
+  created_at INTEGER NOT NULL,
+  UNIQUE (order_id, attempt_no)
 );
 
 CREATE TABLE IF NOT EXISTS order_events (

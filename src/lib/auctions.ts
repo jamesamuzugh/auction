@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 import { tx } from "./db.ts";
-import { formatMoney } from "./money.ts";
+import { deliveryFeeCents, formatMoney, returnFeeCents } from "./money.ts";
 
 export { formatMoney, parseMoney, CURRENCY } from "./money.ts";
 
@@ -42,6 +42,8 @@ export type OrderStatus =
   | "paid"
   | "shipped"
   | "delivered"
+  | "returning"
+  | "returned"
   | "disputed"
   | "completed"
   | "refunded"
@@ -58,6 +60,11 @@ export type Order = {
   seller_id: number;
   seller_name: string;
   amount_cents: number;
+  delivery_fee_cents: number;
+  total_cents: number;
+  return_fee_cents: number;
+  return_code: string | null;
+  returned_at: number | null;
   status: OrderStatus;
   ship_name: string | null;
   ship_phone: string | null;
@@ -175,10 +182,10 @@ export function closeDueAuctions(db: DatabaseSync, now = Date.now()): number {
       if (a.current_bidder_id != null && a.current_bid_cents != null) {
         const o = db
           .prepare(
-            `INSERT OR IGNORE INTO orders (auction_id, buyer_id, seller_id, amount_cents, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)`
+            `INSERT OR IGNORE INTO orders (auction_id, buyer_id, seller_id, amount_cents, delivery_fee_cents, total_cents, return_fee_cents, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
-          .run(id, a.current_bidder_id, a.seller_id, a.current_bid_cents, now, now);
+          .run(id, a.current_bidder_id, a.seller_id, a.current_bid_cents, deliveryFeeCents(), a.current_bid_cents + deliveryFeeCents(), returnFeeCents(), now, now);
         if (o.changes) {
           db.prepare(`INSERT INTO order_events (order_id, status, note, created_at) VALUES (?, ?, ?, ?)`).run(
             Number(o.lastInsertRowid),
@@ -398,7 +405,7 @@ export function markPaidOffline(db: DatabaseSync, orderId: number, note: string,
   if (o.status !== "awaiting_payment") throw new AuctionError("This order isn't waiting for payment.");
   tx(db, () => {
     db.prepare(`UPDATE orders SET escrow_status = 'held' WHERE id = ?`).run(orderId);
-    setStatus(db, orderId, "paid", `Bidwell confirmed payment of ${formatMoney(o.amount_cents)} received${note.trim() ? ` (${note.trim()})` : ""}. Held in escrow.`, now);
+    setStatus(db, orderId, "paid", `Bidwell confirmed payment of ${formatMoney(o.total_cents)} received${note.trim() ? ` (${note.trim()})` : ""}. Held in escrow.`, now);
   });
 }
 
@@ -515,9 +522,97 @@ export function adminConfirmDelivery(db: DatabaseSync, orderId: number, note: st
   });
 }
 
+/** Failed attempts allowed before the item goes back to the seller. */
+export const MAX_DELIVERY_ATTEMPTS = 3;
+
+export type DeliveryAttempt = {
+  id: number;
+  order_id: number;
+  courier_id: number;
+  attempt_no: number;
+  note: string;
+  photo_path: string;
+  lat: number | null;
+  lng: number | null;
+  accuracy_m: number | null;
+  created_at: number;
+};
+
+export function deliveryAttempts(db: DatabaseSync, orderId: number): DeliveryAttempt[] {
+  return db.prepare(`SELECT * FROM delivery_attempts WHERE order_id = ? ORDER BY attempt_no`).all(orderId) as DeliveryAttempt[];
+}
+
+/**
+ * The delivery partner records a failed attempt, proven by a photo taken at the address, the
+ * phone's location and the server time. After the third, the item goes back to the seller: the
+ * seller gets a return code to give the partner when they take it back.
+ */
+export function recordFailedAttempt(
+  db: DatabaseSync,
+  orderId: number,
+  courierId: number,
+  input: { note: string; photoPath: string; lat?: number | null; lng?: number | null; accuracyM?: number | null },
+  now = Date.now()
+): number {
+  const o = requireOrder(db, orderId);
+  if (o.courier_id !== courierId) throw new AuctionError("This delivery isn't assigned to you.");
+  if (o.status !== "shipped") throw new AuctionError("This order isn't out for delivery.");
+  if (!input.photoPath) throw new AuctionError("Take a photo at the address as proof of the visit.");
+  if (input.note.trim().length < 5) throw new AuctionError("Say what happened, e.g. nobody home, phone off.");
+  const n = deliveryAttempts(db, orderId).length + 1;
+  const gps = input.lat != null && input.lng != null && Number.isFinite(input.lat) && Number.isFinite(input.lng);
+  tx(db, () => {
+    db.prepare(
+      `INSERT INTO delivery_attempts (order_id, courier_id, attempt_no, note, photo_path, lat, lng, accuracy_m, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(o.id, courierId, n, input.note.trim().slice(0, 1000), input.photoPath, gps ? input.lat! : null, gps ? input.lng! : null, gps ? input.accuracyM ?? null : null, now);
+    const where = gps ? "location recorded" : "no location from the phone";
+    if (n < MAX_DELIVERY_ATTEMPTS) {
+      setStatus(db, o.id, "shipped", `Delivery attempt ${n} of ${MAX_DELIVERY_ATTEMPTS} failed: ${input.note.trim()} (photo taken, ${where}).`, now);
+    } else {
+      const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+      db.prepare(`UPDATE orders SET return_code = ?, delivery_code_attempts = 0 WHERE id = ?`).run(code, o.id);
+      setStatus(
+        db,
+        o.id,
+        "returning",
+        `Delivery attempt ${n} of ${MAX_DELIVERY_ATTEMPTS} failed: ${input.note.trim()} (photo taken, ${where}). The item is going back to the seller at the winner's cost.`,
+        now
+      );
+    }
+  });
+  return n;
+}
+
+/**
+ * The partner hands the item back to the seller, proven by the seller's return code or
+ * signature. The caller (escrow) then refunds the winner what is left after the fee and
+ * delivery costs.
+ */
+export function confirmReturnToSeller(db: DatabaseSync, orderId: number, courierId: number, proof: DeliveryProof, now = Date.now()) {
+  const o = requireOrder(db, orderId);
+  if (o.courier_id !== courierId) throw new AuctionError("This return isn't assigned to you.");
+  if (o.status !== "returning") throw new AuctionError("This order isn't being returned.");
+  if (!proof.recipientName.trim()) throw new AuctionError("Enter the name of the person who took it back.");
+  if (proof.method === "code") {
+    if (o.delivery_code_attempts >= MAX_CODE_ATTEMPTS) throw new AuctionError("Too many wrong codes. Take the seller's signature instead.");
+    const given = proof.code.replace(/\D/g, "");
+    if (!(given.length === 6 && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(o.return_code ?? "------")))) {
+      db.prepare(`UPDATE orders SET delivery_code_attempts = delivery_code_attempts + 1 WHERE id = ?`).run(o.id);
+      throw new AuctionError("That return code doesn't match.");
+    }
+  } else if (!/^data:image\/png;base64,[A-Za-z0-9+/=]{200,}$/.test(proof.signature) || proof.signature.length > 400_000) {
+    throw new AuctionError("Ask the seller to sign in the box.");
+  }
+  tx(db, () => {
+    db.prepare(`UPDATE orders SET returned_at = ? WHERE id = ?`).run(now, o.id);
+    setStatus(db, o.id, "returned", `${o.carrier} returned the item to ${proof.recipientName.trim()} (${proof.method === "code" ? "seller's return code" : "signature"}).`, now);
+  });
+}
+
 export function deliveriesForPartner(db: DatabaseSync, courierId: number): Order[] {
   return db
-    .prepare(`${ORDER_SELECT} WHERE o.courier_id = ? ORDER BY o.status = 'shipped' DESC, o.shipped_at DESC LIMIT 200`)
+    .prepare(`${ORDER_SELECT} WHERE o.courier_id = ? ORDER BY o.status IN ('shipped','returning') DESC, o.shipped_at DESC LIMIT 200`)
     .all(courierId) as Order[];
 }
 
@@ -561,7 +656,7 @@ export function createPayment(
   db.prepare(
     `INSERT INTO payments (order_id, provider, reference, amount_cents, currency, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(o.id, provider, reference, o.amount_cents, currency, now, now);
+  ).run(o.id, provider, reference, o.total_cents, currency, now, now);
   return { ...getPayment(db, reference)!, buyer_email: o.buyer_email };
 }
 

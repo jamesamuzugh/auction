@@ -47,7 +47,7 @@ export default async function Payouts() {
         <h1 style={{ marginTop: 8 }}>Payouts</h1>
         <p className="muted" style={{ margin: 0 }}>
           Bidwell holds each buyer&apos;s payment until they confirm delivery and 6 hours pass with no problem reported. Then we send it
-          here{fee > 0 ? `, less our ${fee}% fee` : ""}.
+          here, less our {fee}% fee (on the total the winner paid) and the delivery fee.
         </p>
       </div>
 
@@ -93,13 +93,14 @@ export default async function Payouts() {
           <div className="empty-state">No payouts yet.</div>
         ) : (
           <table className="list">
-            <thead><tr><th>Payout</th><th>Sale</th><th>Fee</th><th>You get</th><th>Status</th></tr></thead>
+            <thead><tr><th>Payout</th><th>Paid by winner</th><th>Fee</th><th>Delivery</th><th>You get</th><th>Status</th></tr></thead>
             <tbody>
               {payouts.map((p) => (
                 <tr key={p.id}>
                   <td><Link href={`/orders/${p.order_id}`}>{p.auction_title}</Link><div className="small muted">{dateTime(p.created_at)}</div></td>
                   <td>{formatMoney(p.gross_cents)}</td>
                   <td>{formatMoney(p.fee_cents)}</td>
+                  <td>{formatMoney(p.delivery_fee_cents)}</td>
                   <td><strong>{formatMoney(p.amount_cents)}</strong></td>
                   <td><span className={`pill ${STATUS[p.status][0]}`}>{STATUS[p.status][1]}</span></td>
                 </tr>
