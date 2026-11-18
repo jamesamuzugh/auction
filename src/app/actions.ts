@@ -32,7 +32,11 @@ import {
   setShippingAddress,
 } from "@/lib/auctions.ts";
 import { getProvider } from "@/lib/payments/index.ts";
-import { saveProofPhoto } from "@/lib/proofs.ts";
+import { saveKycPhoto, saveProofPhoto } from "@/lib/proofs.ts";
+import { setDeliveryRate } from "@/lib/delivery.ts";
+import { BANDS, GHANA_REGIONS, SIZES, type DistanceBand, type ItemSize } from "@/lib/places.ts";
+import { smsProvider } from "@/lib/sms.ts";
+import { assertVerified, confirmPhoneCode, reviewIdCheck, startPhoneCheck, submitIdCheck, validateIdDetails } from "@/lib/verify.ts";
 import {
   DISPUTE_REASONS,
   acceptItem,
@@ -111,6 +115,13 @@ export async function createAuctionAction(_: FormState, f: FormData): Promise<Fo
   if (!user) redirect("/login?next=/sell");
   let id: number;
   try {
+    assertVerified(getDb(), user.id, "list an item");
+    const size = str(f, "size");
+    if (!SIZES.some((s) => s.value === size)) throw new AuctionError("Choose the item's size, so delivery can be priced.");
+    const pickupCity = str(f, "pickup_city").trim();
+    const pickupRegion = str(f, "pickup_region");
+    if (!pickupCity) throw new AuctionError("Enter the city or town where the item will be collected.");
+    if (!GHANA_REGIONS.includes(pickupRegion)) throw new AuctionError("Choose the region where the item will be collected.");
     const startingBidCents = parseMoney(str(f, "starting_bid"));
     const minIncrementCents = parseMoney(str(f, "min_increment"));
     if (Number.isNaN(startingBidCents)) throw new AuctionError("Enter a valid starting bid.");
@@ -143,6 +154,9 @@ export async function createAuctionAction(_: FormState, f: FormData): Promise<Fo
       category,
       condition,
       imagePath,
+      size,
+      pickupCity,
+      pickupRegion,
       startingBidCents,
       minIncrementCents,
       endsAt,
@@ -160,6 +174,7 @@ export async function bidAction(_: FormState, f: FormData): Promise<FormState> {
   if (!user) redirect(`/login?next=/auctions/${auctionId}`);
   try {
     const amount = parseMoney(str(f, "amount"));
+    assertVerified(db(), user.id, "bid");
     if (Number.isNaN(amount)) throw new AuctionError("Enter a valid bid amount.");
     placeBid(db(), auctionId, user.id, amount);
   } catch (e) {
@@ -472,4 +487,87 @@ export async function savePayoutAccountAction(_: FormState, f: FormData): Promis
   await moveMoney();
   revalidatePath("/account/payouts");
   return { ok: "Payout details saved. Released funds will be sent here." };
+}
+
+// ---- Verification ----
+
+export async function sendPhoneCodeAction(_: FormState, f: FormData): Promise<FormState> {
+  const user = await currentUser();
+  if (!user) redirect("/login?next=/account/verify");
+  try {
+    const { phone, code } = startPhoneCheck(getDb(), user.id, str(f, "phone"));
+    const sms = smsProvider();
+    const r = await sms.send(phone, `Your Bidwell code is ${code}. It expires in 10 minutes. Never share it with anyone.`);
+    if (!r.ok) {
+      console.error("sms failed", sms.name, r.error);
+      throw new AuctionError("We couldn't send the text. Check the number and try again in a minute.");
+    }
+    revalidatePath("/account/verify");
+    return { ok: r.demoCode ? `Demo mode, no text was sent. Your code is ${r.demoCode}.` : `We texted a code to ${phone}.` };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+export async function confirmPhoneAction(_: FormState, f: FormData): Promise<FormState> {
+  const user = await currentUser();
+  if (!user) redirect("/login?next=/account/verify");
+  try {
+    const r = confirmPhoneCode(getDb(), user.id, str(f, "code"));
+    if (!r.ok) return { error: r.error };
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath("/account/verify");
+  return { ok: "Phone number confirmed." };
+}
+
+export async function submitIdAction(_: FormState, f: FormData): Promise<FormState> {
+  const user = await currentUser();
+  if (!user) redirect("/login?next=/account/verify");
+  try {
+    const details = { docType: str(f, "doc_type"), docNumber: str(f, "doc_number"), fullName: str(f, "full_name"), dateOfBirth: str(f, "dob") };
+    const { needsBack } = validateIdDetails(getDb(), user.id, details);
+    const frontPath = await saveKycPhoto(f.get("front"), "a photo of the front of your ID");
+    const back = f.get("back");
+    const backPath = needsBack || (back instanceof File && back.size > 0) ? await saveKycPhoto(back, "a photo of the back of your ID") : null;
+    const selfiePath = await saveKycPhoto(f.get("selfie"), "a selfie holding your ID");
+    submitIdCheck(getDb(), user.id, { ...details, frontPath, backPath, selfiePath });
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath("/account/verify");
+  revalidatePath("/admin");
+  return { ok: "Thanks. Bidwell will check your ID, usually within one working day." };
+}
+
+export async function reviewIdAction(_: FormState, f: FormData): Promise<FormState> {
+  try {
+    const admin = await adminUser();
+    const approve = str(f, "decision") === "approve";
+    reviewIdCheck(getDb(), Number(str(f, "check_id")), admin.id, approve, str(f, "reason"));
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath("/admin");
+  return { ok: "Decision saved." };
+}
+
+export async function deliveryRatesAction(_: FormState, f: FormData): Promise<FormState> {
+  try {
+    await adminUser();
+    const d = getDb();
+    const updates: [ItemSize, DistanceBand, number][] = [];
+    for (const s of SIZES)
+      for (const b of BANDS) {
+        const v = parseMoney(str(f, `rate_${s.value}_${b.value}`));
+        if (Number.isNaN(v)) throw new AuctionError(`Enter a price for ${s.label.toLowerCase()} items, ${b.label.toLowerCase()}.`);
+        updates.push([s.value, b.value, v]);
+      }
+    for (const [s, b, v] of updates) setDeliveryRate(d, s, b, v);
+  } catch (e) {
+    return fail(e);
+  }
+  revalidatePath("/admin");
+  return { ok: "Delivery prices saved. New addresses use them; orders already priced keep their price." };
 }

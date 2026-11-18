@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ActionForm, Submit } from "./Form.tsx";
 import { createAuctionAction } from "@/app/actions.ts";
 import { CURRENCY } from "@/lib/money.ts";
+import { GHANA_REGIONS, SIZES } from "@/lib/places.ts";
 
 const DURATIONS = [
   { v: "3600000", l: "1 hour" },
@@ -60,6 +61,30 @@ export default function SellForm({ categories, conditions }: { categories: strin
             {conditions.map((c) => (
               <option key={c}>{c}</option>
             ))}
+          </select>
+        </label>
+      </div>
+      <fieldset className="choices">
+        <legend>Size, for pricing delivery</legend>
+        {SIZES.map((s) => (
+          <label key={s.value} className="choice">
+            <input type="radio" name="size" value={s.value} defaultChecked={s.value === "medium"} required /> <strong>{s.label}</strong>{" "}
+            <span className="muted small">{s.hint}</span>
+          </label>
+        ))}
+      </fieldset>
+      <div className="two">
+        <label>
+          Collection city or town
+          <span className="hint">Where the delivery partner picks it up</span>
+          <input name="pickup_city" placeholder="e.g. Kumasi" required />
+        </label>
+        <label>
+          Region
+          <span className="hint">&nbsp;</span>
+          <select name="pickup_region" defaultValue="" required>
+            <option value="" disabled>Choose one</option>
+            {GHANA_REGIONS.map((r) => <option key={r}>{r}</option>)}
           </select>
         </label>
       </div>

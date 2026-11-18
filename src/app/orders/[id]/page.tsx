@@ -370,7 +370,7 @@ export default async function OrderPage({
             {o.ship_country}<br />
             {o.ship_phone}
           </address>
-          {isBuyer && (o.status === "awaiting_payment" || o.status === "paid") && (
+          {isBuyer && o.status === "awaiting_payment" && (
             <details style={{ marginTop: 12 }}>
               <summary className="small muted" style={{ cursor: "pointer" }}>Change address</summary>
               <div style={{ marginTop: 12 }}><AddressForm order={o} /></div>

@@ -12,6 +12,7 @@ import {
   placeBid,
   setShippingAddress,
 } from "../src/lib/auctions.ts";
+import { markVerifiedForTesting } from "../src/lib/verify.ts";
 
 const db = getDb();
 const user = (email: string, name: string) => {
@@ -27,21 +28,26 @@ const other = user("bidder@example.com", "Esi Bidder");
 user("admin@example.com", "Bidwell Admin"); // add admin@example.com to ADMIN_EMAILS
 const rider = user("rider@example.com", "Kwame Rider");
 addDeliveryPartner(db, "rider@example.com", "Speedaf Express");
+user("new@example.com", "Yaw New"); // not verified, to try the phone and ID steps
+markVerifiedForTesting(db, seller.id, "+233241000001");
+markVerifiedForTesting(db, buyer.id, "+233241000002");
+markVerifiedForTesting(db, other.id, "+233241000003");
 
 const now = Date.now();
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 const items = [
-  ["Samsung Galaxy S21, 128GB", "Phones & Tablets", "Used - Good", 80000, 2000, 3 * DAY, "Light scratches on the back, screen is perfect. Comes with charger."],
-  ["Dell Latitude 7490 laptop", "Computers", "Used - Good", 150000, 5000, 5 * DAY, "i5, 16GB RAM, 256GB SSD. Battery holds about 4 hours."],
-  ["Wooden study desk", "Furniture", "Used - Fair", 30000, 1000, 2 * DAY, "Solid wood, a few marks on the top. Pickup or delivery."],
-  ["Canon EOS 2000D camera kit", "Electronics", "Used - Like new", 200000, 5000, 7 * DAY, "Used twice. 18-55mm lens, bag and memory card included."],
-  ["Men's leather jacket, size L", "Fashion", "Used - Good", 15000, 500, 1 * DAY, "Genuine leather, worn one season."],
-  ["Mountain bike, 26 inch", "Sports & Outdoors", "Used - Fair", 60000, 2000, 10 * MIN, "Needs new brake pads, otherwise rides well."],
+  ["Samsung Galaxy S21, 128GB", "Phones & Tablets", "Used - Good", 80000, 2000, 3 * DAY, "Light scratches on the back, screen is perfect. Comes with charger.", "small"],
+  ["Dell Latitude 7490 laptop", "Computers", "Used - Good", 150000, 5000, 5 * DAY, "i5, 16GB RAM, 256GB SSD. Battery holds about 4 hours.", "medium"],
+  ["Wooden study desk", "Furniture", "Used - Fair", 30000, 1000, 2 * DAY, "Solid wood, a few marks on the top. Pickup or delivery.", "xl"],
+  ["Canon EOS 2000D camera kit", "Electronics", "Used - Like new", 200000, 5000, 7 * DAY, "Used twice. 18-55mm lens, bag and memory card included.", "medium"],
+  ["Men's leather jacket, size L", "Fashion", "Used - Good", 15000, 500, 1 * DAY, "Genuine leather, worn one season.", "small"],
+  ["Mountain bike, 26 inch", "Sports & Outdoors", "Used - Fair", 60000, 2000, 10 * MIN, "Needs new brake pads, otherwise rides well.", "large"],
 ] as const;
+const pickup = { pickupCity: "Accra", pickupRegion: "Greater Accra" };
 
-for (const [title, category, condition, start, inc, len, description] of items) {
+for (const [title, category, condition, start, inc, len, description, size] of items) {
   const id = createAuction(db, {
-    sellerId: seller.id, title, description, category, condition, imagePath: null,
+    sellerId: seller.id, title, description, category, condition, imagePath: null, size, ...pickup,
     startingBidCents: start, minIncrementCents: inc, endsAt: now + len,
   });
   if (start < 100000) {
@@ -58,7 +64,7 @@ const ended = [
 ended.forEach(([title, category, start, description], i) => {
   const t0 = now - 3 * HOUR;
   const id = createAuction(db, {
-    sellerId: seller.id, title, description, category, condition: "Used - Good", imagePath: null,
+    sellerId: seller.id, title, description, category, condition: "Used - Good", imagePath: null, size: "medium", ...pickup,
     startingBidCents: start, minIncrementCents: 1000, endsAt: t0 + 2 * MIN,
   }, t0);
   placeBid(db, id, other.id, start, t0 + MIN);
@@ -73,4 +79,4 @@ ended.forEach(([title, category, start, description], i) => {
   }
 });
 
-console.log("Seeded. Sign in as seller@example.com, buyer@example.com or bidder@example.com with password123 (admin: admin@example.com, delivery partner: rider@example.com).");
+console.log("Seeded. Sign in as seller@example.com, buyer@example.com or bidder@example.com with password123 (admin: admin@example.com, delivery partner: rider@example.com, not yet verified: new@example.com).");

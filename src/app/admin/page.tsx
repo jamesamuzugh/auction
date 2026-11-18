@@ -17,6 +17,11 @@ import AdminButton from "@/components/AdminButton.tsx";
 import { AddPartnerForm, RemovePartnerButton } from "@/components/PartnerForms.tsx";
 import { listDeliveryPartners } from "@/lib/auctions.ts";
 import Countdown from "@/components/Countdown.tsx";
+import { DeliveryRatesForm, ReviewIdForm } from "@/components/VerifyForms.tsx";
+import { DOC_TYPES, pendingIdChecks, recentIdDecisions } from "@/lib/verify.ts";
+import { deliveryRates } from "@/lib/delivery.ts";
+import { BANDS, SIZES } from "@/lib/places.ts";
+import { CURRENCY } from "@/lib/money.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +46,15 @@ export default async function Admin() {
   const refunds = adminRefunds(d);
   const provider = payoutProvider();
   const partners = listDeliveryPartners(d);
+  const idChecks = pendingIdChecks(d);
+  const idDone = recentIdDecisions(d, 10);
+  const photo = (f: string | null, alt: string) =>
+    f ? (
+      <a href={`/api/kyc/${f}`} target="_blank" rel="noopener">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={`/api/kyc/${f}`} alt={alt} className="kyc" />
+      </a>
+    ) : null;
 
   return (
     <div style={{ display: "grid", gap: 18 }}>
@@ -170,6 +184,66 @@ export default async function Admin() {
               </tbody>
             </table>
           )}
+        </div>
+      </section>
+
+      <section>
+        <h2>ID checks {idChecks.length > 0 && <span className="pill err">{idChecks.length} waiting</span>}</h2>
+        <p className="small muted" style={{ marginTop: -6 }}>
+          Members can&apos;t bid or sell until you approve their ID. Check the name and date of birth match the ID, the ID looks genuine,
+          and the face in the selfie matches the ID photo.
+        </p>
+        {idChecks.length === 0 ? (
+          <div className="card empty-state">No ID checks waiting.</div>
+        ) : (
+          idChecks.map((c) => (
+            <div key={c.id} className="card pad stack" style={{ marginBottom: 12 }}>
+              <div className="spread">
+                <strong>{c.user_name} <span className="muted small">· {c.user_email} · {c.user_phone ?? "no phone"}</span></strong>
+                <span className="small muted">Sent {dateTime(c.created_at)}</span>
+              </div>
+              <table className="list">
+                <tbody>
+                  <tr><th>ID</th><td>{DOC_TYPES.find((t) => t.value === c.doc_type)?.label} · <strong>{c.doc_number}</strong></td></tr>
+                  <tr><th>Name on ID</th><td>{c.full_name}{c.full_name.toLowerCase() !== c.user_name.toLowerCase() && <span className="pill accent" style={{ marginLeft: 8 }}>Differs from account name</span>}</td></tr>
+                  <tr><th>Date of birth</th><td>{c.date_of_birth}</td></tr>
+                </tbody>
+              </table>
+              {c.same_number_elsewhere > 0 && <div className="msg err">This ID number was also used by {c.same_number_elsewhere} other account(s).</div>}
+              <div className="row">{photo(c.front_path, "Front of ID")}{photo(c.back_path, "Back of ID")}{photo(c.selfie_path, "Selfie with ID")}</div>
+              <ReviewIdForm checkId={c.id} />
+            </div>
+          ))
+        )}
+        {idDone.length > 0 && (
+          <details className="card pad" style={{ marginTop: 12 }}>
+            <summary className="small"><strong>Recent decisions</strong></summary>
+            <div className="table-wrap">
+              <table className="list">
+                <tbody>
+                  {idDone.map((c) => (
+                    <tr key={c.id}>
+                      <td>{c.user_name}</td>
+                      <td className="small muted">{DOC_TYPES.find((t) => t.value === c.doc_type)?.label} {c.doc_number}</td>
+                      <td><span className={`pill ${c.status === "approved" ? "ok" : "err"}`}>{c.status === "approved" ? "Approved" : "Rejected"}</span></td>
+                      <td className="small">{c.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        )}
+      </section>
+
+      <section>
+        <h2>Delivery prices</h2>
+        <p className="small muted" style={{ marginTop: -6 }}>
+          What the winner pays for delivery, by item size and distance from the seller&apos;s collection point. A return after 3 failed
+          deliveries costs the same. These are starting placeholders: set your real prices here.
+        </p>
+        <div className="card pad">
+          <DeliveryRatesForm sizes={SIZES} bands={BANDS} rates={deliveryRates(d)} currency={CURRENCY} />
         </div>
       </section>
 

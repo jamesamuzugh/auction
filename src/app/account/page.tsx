@@ -4,6 +4,7 @@ import { auctionsBidOnBy, auctionsSoldBy, ordersForBuyer } from "@/lib/auctions.
 import { formatMoney } from "@/lib/money.ts";
 import { ORDER_LABEL } from "@/lib/format.ts";
 import Countdown from "@/components/Countdown.tsx";
+import { verificationFor } from "@/lib/verify.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,7 @@ export default async function Account() {
   const won = ordersForBuyer(d, me.id);
   const bids = auctionsBidOnBy(d, me.id).filter((a) => a.status === "active");
   const selling = auctionsSoldBy(d, me.id);
+  const v = verificationFor(d, me.id);
 
   return (
     <>
@@ -26,6 +28,20 @@ export default async function Account() {
         <p className="muted" style={{ margin: 0 }}>{me.email}</p>
         <Link href="/account/payouts" className="btn">Payouts and payout details</Link>
       </div>
+      {v.verified ? (
+        <p className="small" style={{ marginTop: 8 }}><span className="pill ok">Verified</span> Phone and ID checked</p>
+      ) : (
+        <div className="card pad spread" style={{ marginTop: 14 }}>
+          <span>
+            {v.idStatus === "pending"
+              ? "Your ID is being checked. You can bid and sell once it's approved."
+              : v.idStatus === "rejected"
+                ? "Your ID check wasn't approved. Please send it again."
+                : "Verify your phone and ID to start bidding and selling."}
+          </span>
+          <Link className="btn primary" href="/account/verify">{v.idStatus === "pending" ? "See status" : "Verify now"}</Link>
+        </div>
+      )}
 
       <h2>Items you won</h2>
       <div className="card table-wrap">
