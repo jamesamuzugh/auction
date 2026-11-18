@@ -6,10 +6,27 @@ highest bidder wins, adds a shipping address and pays **Bidwell** through **Pays
 holds the money in **escrow** while the seller ships, and only pays the seller once the buyer
 confirms delivery and **6 hours pass without a reported problem**.
 
+## Verification
+
+Everyone confirms a phone number (6-digit SMS code: 10 minutes to use it, 5 tries, at most 5 texts an
+hour) and sends an ID (Ghana Card, passport, driver's licence or voter ID, plus a selfie holding it)
+before they can bid or list. Admins approve or reject ID checks on `/admin`. A phone number or ID
+number can belong to only one account, and members must be 18 or older. ID photos are private
+(`KYC_DIR`, default `data/kyc`) and shown only to the member and admins. SMS goes through Hubtel or
+Arkesel (`SMS_PROVIDER`); with neither set in development, the code is shown on screen.
+
+## Delivery prices
+
+Sellers pick a size (small, medium, large, extra large) and the collection city and region when
+listing. When the winner adds an address, delivery is priced from an admin-editable table of size by
+distance band. Until there is a maps provider for road distance, the bands are same city, same
+region and another region. The table starts with placeholder prices; set real ones on `/admin`.
+
 ## How escrow works
 
 | Step | Money |
 | --- | --- |
+| Winner gives an address; delivery is priced on the item's size and distance (same city / same region / another region) | Not paid yet |
 | Winner pays the winning bid plus the delivery fee | Held by Bidwell (`escrow_status = held`) |
 | Seller hands the item to a Bidwell delivery partner | Still held; the winner gets a 6-digit delivery code |
 | Delivery partner confirms handover with the winner's code or signature | Still held; 6-hour window starts |
@@ -18,7 +35,7 @@ confirms delivery and **6 hours pass without a reported problem**.
 | Winner reports a problem (any time after paying, until the window ends) | Frozen until an admin decides |
 | Admin decides | Refund the winner (in full), pay the seller, or let the order continue |
 | Partner fails to deliver 3 times (photo + GPS + note each time) | Item goes back to the seller, who gives the partner a return code |
-| Partner confirms the return | Winner refunded the total less the 5% fee, the delivery fee and the return fee |
+| Partner confirms the return | Winner refunded the total less the 5% fee, the delivery fee and the return fee (same as delivery) |
 
 - Payouts go to the seller's bank account or mobile money wallet via Paystack Transfers;
   refunds go back through Paystack Refunds. Both are queued, claimed before sending (so they

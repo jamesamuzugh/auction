@@ -37,11 +37,16 @@ import {
   adminOverview,
 } from "../src/lib/escrow.ts";
 import { demo } from "../src/lib/payments/demo.ts";
+import { setDeliveryRate } from "../src/lib/delivery.ts";
+import { BANDS, SIZES } from "../src/lib/places.ts";
 import type { PaymentProvider } from "../src/lib/payments/types.ts";
 
 const HOUR = 3_600_000;
-process.env.DELIVERY_FEE = "30"; // winner pays bid + 30.00 delivery
-process.env.RETURN_FEE = "30";
+
+/** Every size and distance costs the same in these tests. */
+function flatDelivery(db: import("node:sqlite").DatabaseSync, cents: number) {
+  for (const s of SIZES) for (const b of BANDS) setDeliveryRate(db, s.value, b.value, cents);
+}
 process.env.PLATFORM_FEE_PERCENT = "5";
 const addr = { name: "B", phone: "0240000000", line1: "1 St", city: "Accra", region: "GA", country: "Ghana" };
 const momo = { method: "mobile_money" as const, bankCode: "MTN", bankName: "MTN Mobile Money", accountNumber: "0241234567", accountName: "Seller Name" };
@@ -54,6 +59,7 @@ function paidOrder() {
   const admin = registerUser(db, "admin@example.com", "Admin", "password123");
   const rider = registerUser(db, "rider@example.com", "Rider", "password123");
   addDeliveryPartner(db, "rider@example.com", "Speedaf");
+  flatDelivery(db, 3000); // winner pays bid + 30.00 delivery; a return costs the same
   const t0 = Date.now() - 48 * HOUR;
   const aid = createAuction(
     db,

@@ -120,7 +120,7 @@ test("closing picks the highest bidder and the order runs through to delivery", 
   markShipped(db, o.id, seller.id, rider.id, "TRACK123");
   assert.throws(
     () => setShippingAddress(db, o.id, bob.id, { name: "Bob", phone: "1", line1: "a", city: "c", region: "r", country: "k" }),
-    /already shipped/
+    /already paid/
   );
   const code = getOrderForAuction(db, id)!.delivery_code!;
   assert.match(code, /^\d{6}$/);

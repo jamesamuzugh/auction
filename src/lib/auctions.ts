@@ -1,7 +1,9 @@
 import type { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 import { tx } from "./db.ts";
-import { deliveryFeeCents, formatMoney, returnFeeCents } from "./money.ts";
+import { formatMoney } from "./money.ts";
+import { quoteDelivery } from "./delivery.ts";
+import { SIZES } from "./places.ts";
 
 export { formatMoney, parseMoney, CURRENCY } from "./money.ts";
 
@@ -14,6 +16,9 @@ export type Auction = {
   category: string;
   condition: string;
   image_path: string | null;
+  size: string;
+  pickup_city: string | null;
+  pickup_region: string | null;
   starting_bid_cents: number;
   min_increment_cents: number;
   current_bid_cents: number | null;
@@ -127,6 +132,11 @@ export type NewAuction = {
   category: string;
   condition: string;
   imagePath: string | null;
+  /** small | medium | large | xl. Defaults to medium. */
+  size?: string;
+  /** Where the delivery partner collects the item. Used to price delivery. */
+  pickupCity?: string;
+  pickupRegion?: string;
   startingBidCents: number;
   minIncrementCents: number;
   endsAt: number;
@@ -141,12 +151,14 @@ export function createAuction(db: DatabaseSync, input: NewAuction, now = Date.no
     throw new AuctionError("Minimum increment must be more than zero.");
   if (input.endsAt <= now + 60_000) throw new AuctionError("The auction must stay open for at least a minute.");
   if (input.endsAt > now + 90 * 86_400_000) throw new AuctionError("Auctions can run for at most 90 days.");
+  const size = input.size ?? "medium";
+  if (!SIZES.some((s) => s.value === size)) throw new AuctionError("Choose the item's size.");
 
   const r = db
     .prepare(
-      `INSERT INTO auctions (seller_id, title, description, category, condition, image_path,
+      `INSERT INTO auctions (seller_id, title, description, category, condition, image_path, size, pickup_city, pickup_region,
          starting_bid_cents, min_increment_cents, starts_at, ends_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.sellerId,
@@ -155,6 +167,9 @@ export function createAuction(db: DatabaseSync, input: NewAuction, now = Date.no
       input.category,
       input.condition,
       input.imagePath,
+      size,
+      input.pickupCity?.trim() || null,
+      input.pickupRegion?.trim() || null,
       input.startingBidCents,
       input.minIncrementCents,
       now,
@@ -182,10 +197,11 @@ export function closeDueAuctions(db: DatabaseSync, now = Date.now()): number {
       if (a.current_bidder_id != null && a.current_bid_cents != null) {
         const o = db
           .prepare(
+            // Delivery is priced once the winner gives an address (see setShippingAddress).
             `INSERT OR IGNORE INTO orders (auction_id, buyer_id, seller_id, amount_cents, delivery_fee_cents, total_cents, return_fee_cents, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             VALUES (?, ?, ?, ?, 0, ?, 0, ?, ?)`
           )
-          .run(id, a.current_bidder_id, a.seller_id, a.current_bid_cents, deliveryFeeCents(), a.current_bid_cents + deliveryFeeCents(), returnFeeCents(), now, now);
+          .run(id, a.current_bidder_id, a.seller_id, a.current_bid_cents, a.current_bid_cents, now, now);
         if (o.changes) {
           db.prepare(`INSERT INTO order_events (order_id, status, note, created_at) VALUES (?, ?, ?, ?)`).run(
             Number(o.lastInsertRowid),
@@ -357,19 +373,25 @@ export function requireOrder(db: DatabaseSync, orderId: number): Order {
   return o;
 }
 
-/** The winner saves (or corrects, until it ships) their shipping address. */
+/**
+ * The winner saves (or corrects, until they pay) their shipping address. This prices delivery
+ * from the item's size and the distance from the pickup location. A return after failed
+ * deliveries costs the same.
+ */
 export function setShippingAddress(db: DatabaseSync, orderId: number, userId: number, addr: ShippingAddress, now = Date.now()) {
   const o = requireOrder(db, orderId);
   if (o.buyer_id !== userId) throw new AuctionError("Only the winner can set the shipping address.");
-  if (!["awaiting_address", "awaiting_payment", "paid"].includes(o.status))
-    throw new AuctionError("The item has already shipped, so the address can't be changed.");
+  if (!["awaiting_address", "awaiting_payment"].includes(o.status))
+    throw new AuctionError("You've already paid, so the address can't be changed here. Contact Bidwell if it's wrong.");
   for (const k of ["name", "phone", "line1", "city", "region", "country"] as const) {
     if (!addr[k]?.trim()) throw new AuctionError("Fill in every required address field.");
   }
+  const a = getAuction(db, o.auction_id)!;
+  const { feeCents } = quoteDelivery(db, a.size, { city: a.pickup_city, region: a.pickup_region }, { city: addr.city, region: addr.region });
   tx(db, () => {
     db.prepare(
       `UPDATE orders SET ship_name=?, ship_phone=?, ship_line1=?, ship_line2=?, ship_city=?, ship_region=?,
-         ship_postal=?, ship_country=?, updated_at=? WHERE id = ?`
+         ship_postal=?, ship_country=?, delivery_fee_cents=?, return_fee_cents=?, total_cents=amount_cents + ?, updated_at=? WHERE id = ?`
     ).run(
       addr.name.trim(),
       addr.phone.trim(),
@@ -379,16 +401,19 @@ export function setShippingAddress(db: DatabaseSync, orderId: number, userId: nu
       addr.region.trim(),
       addr.postal?.trim() || null,
       addr.country.trim(),
+      feeCents,
+      feeCents,
+      feeCents,
       now,
       orderId
     );
     if (o.status === "awaiting_address") {
-      setStatus(db, orderId, "awaiting_payment", "Shipping address added. Waiting for payment.", now);
+      setStatus(db, orderId, "awaiting_payment", `Shipping address added. Delivery costs ${formatMoney(feeCents)}. Waiting for payment.`, now);
     } else {
       db.prepare(`INSERT INTO order_events (order_id, status, note, created_at) VALUES (?, ?, ?, ?)`).run(
         orderId,
         o.status,
-        "Shipping address updated.",
+        `Shipping address updated. Delivery costs ${formatMoney(feeCents)}.`,
         now
       );
     }

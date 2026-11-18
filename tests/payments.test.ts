@@ -16,14 +16,21 @@ import {
   setShippingAddress,
 } from "../src/lib/auctions.ts";
 import { paystack } from "../src/lib/payments/paystack.ts";
+import { setDeliveryRate } from "../src/lib/delivery.ts";
+import { BANDS, SIZES } from "../src/lib/places.ts";
 
 const HOUR = 3_600_000;
-process.env.DELIVERY_FEE = "0"; // keep payment amounts equal to the bid in these tests
+
+/** Every size and distance costs the same in these tests. */
+function flatDelivery(db: import("node:sqlite").DatabaseSync, cents: number) {
+  for (const s of SIZES) for (const b of BANDS) setDeliveryRate(db, s.value, b.value, cents);
+}
 
 function wonOrder() {
   const db = getDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "auction-pay-")), "t.db"));
   const seller = registerUser(db, "s@example.com", "Seller", "password123");
   const buyer = registerUser(db, "b@example.com", "Buyer", "password123");
+  flatDelivery(db, 0); // keep payment amounts equal to the bid in these tests
   const t0 = Date.now();
   const id = createAuction(
     db,

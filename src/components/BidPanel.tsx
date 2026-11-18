@@ -13,11 +13,13 @@ import { Submit } from "./Form.tsx";
 export default function BidPanel({
   initial,
   signedIn,
+  verified,
   isSeller,
   orderId,
 }: {
   initial: Snapshot;
   signedIn: boolean;
+  verified: boolean;
   isSeller: boolean;
   orderId: number | null;
 }) {
@@ -75,7 +77,15 @@ export default function BidPanel({
 
       {open && s.leading && <div className="msg ok">You're the highest bidder.</div>}
 
-      {open && !isSeller && signedIn && !s.leading && (
+      {open && !isSeller && signedIn && !verified && !s.leading && (
+        <div className="stack" style={{ display: "grid", gap: 10 }}>
+          <div className="msg" style={{ background: "var(--bg)" }}>
+            To keep auctions safe, every bidder confirms their phone number and ID once before bidding.
+          </div>
+          <Link className="btn primary" href={`/account/verify?next=/auctions/${s.id}`}>Verify your account to bid</Link>
+        </div>
+      )}
+      {open && !isSeller && signedIn && verified && !s.leading && (
         <form action={formAction} className="stack" key={s.min_next_cents}>
           {state?.error && <div className="msg err" role="alert">{state.error}</div>}
           

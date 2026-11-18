@@ -13,6 +13,7 @@ import {
   startPaymentAction,
 } from "@/app/actions.ts";
 import type { Order } from "@/lib/auctions.ts";
+import { GHANA_REGIONS } from "@/lib/places.ts";
 
 export function AddressForm({ order }: { order: Order }) {
   return (
@@ -26,12 +27,19 @@ export function AddressForm({ order }: { order: Order }) {
       <label>Address line 2 <span className="hint">Optional</span><input name="line2" autoComplete="address-line2" defaultValue={order.ship_line2 ?? ""} /></label>
       <div className="two">
         <label>City / town<input name="city" autoComplete="address-level2" defaultValue={order.ship_city ?? ""} required /></label>
-        <label>State / region<input name="region" autoComplete="address-level1" defaultValue={order.ship_region ?? ""} required /></label>
+        <label>
+          Region
+          <select name="region" autoComplete="address-level1" defaultValue={order.ship_region ?? ""} required>
+            <option value="" disabled>Choose one</option>
+            {GHANA_REGIONS.map((r) => <option key={r}>{r}</option>)}
+          </select>
+        </label>
       </div>
       <div className="two">
         <label>Postal code <span className="hint">Optional</span><input name="postal" autoComplete="postal-code" defaultValue={order.ship_postal ?? ""} /></label>
-        <label>Country<input name="country" autoComplete="country-name" defaultValue={order.ship_country ?? ""} required /></label>
+        <label>Country<input name="country" autoComplete="country-name" defaultValue={order.ship_country ?? "Ghana"} required /></label>
       </div>
+      <p className="small muted" style={{ margin: 0 }}>Delivery is priced from your city and region and the item&apos;s size. You&apos;ll see the price before you pay.</p>
       <div><Submit>{order.ship_line1 ? "Update address" : "Save address"}</Submit></div>
     </ActionForm>
   );
